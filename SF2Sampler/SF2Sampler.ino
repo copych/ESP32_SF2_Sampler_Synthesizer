@@ -11,9 +11,13 @@
 *
 * Libraries used:
 * Arduino MIDI library https://github.com/FortySevenEffects/arduino_midi_library
+* ESP32 usb midi host library by Enudenki https://github.com/enudenki/esp32-usb-host-midi-library
 * Optional. Using RGB LEDs requires FastLED library https://github.com/FastLED/FastLED
+
 *
 * (c) Copych 2025, License: MIT https://github.com/copych/SF2_Sampler?tab=MIT-1-ov-file#readme
+
+This fork by Lidlaux adds usb midi host functionality to the Copych code.
 * 
 * More info:
 * https://github.com/copych/SF2_Sampler
@@ -53,6 +57,11 @@ static const char* TAG = "Main";
     #include "src/usbmidi/src/USB-MIDI.h"
 #endif
 
+#if MIDI_IN_DEV == USE_USB_HOST
+#include "src/usbhost/src/SimpleTimer.h"
+#include "src/usbhost/src/UsbMidi.h"
+#endif
+
 #include "i2s_in_out.h" 
 
 // tasks for Core0 and Core1
@@ -71,6 +80,11 @@ int Voice::usage; // counts voices internally
 #if MIDI_IN_DEV == USE_USB_MIDI_DEVICE
     USBMIDI_CREATE_INSTANCE(0, MIDI); 
 #endif
+
+#if MIDI_IN_DEV == USE_USB_HOST
+    UsbMidi usbMidi;
+#endif
+
 
 // ========================== Global devices ===============================================================================================
 #ifdef ENABLE_CHORUS
@@ -115,6 +129,8 @@ SynthState state {
 #endif
 
 // ========================== MIDI handlers ===============================================================================================
+#if MIDI_IN_DEV == USE_MIDI_STANDARD || MIDI_IN_DEV == USE_USB_MIDI_DEVICE
+
 void handleNoteOn(byte ch, byte note, byte vel) {
 #ifdef ENABLE_RGB_LED
     triggerLedFlash();
@@ -136,13 +152,52 @@ void handleControlChange(byte ch, byte control, byte value) {
 }
 
 void handleProgramChange(uint8_t ch, uint8_t program) {
-    ESP_LOGI("MIDI", "Program change on channel 0%u → program %u", ch-1, program);
+//    ESP_LOGI("MIDI", "Program change on channel 0%u → program %u", ch-1, program);
     synth.programChange(ch-1, program);
 }
 
 void handleSystemExclusive( uint8_t* data, size_t len) {
     synth.handleSysEx( data,  len); 
 }
+#endif
+// ========================== USB MIDI HOST Callback ===========================================
+#if MIDI_IN_DEV == USE_USB_HOST
+void handleMidiMessage(const uint8_t (&data)[4]) {
+    auto cin = static_cast<MidiCin>(data[0] & 0x0F);
+    uint8_t channel = (data[1] & 0x0F) + 1; // channels 1-16
+
+    switch (cin) {
+        case MidiCin::NOTE_ON: {
+            uint8_t note = data[2];
+            uint8_t vel  = data[3];
+            synth.noteOn(channel, note, vel);
+            break;
+        }
+
+        case MidiCin::NOTE_OFF: {
+            uint8_t note = data[2];
+            synth.noteOff(channel, note);
+            break;
+        }
+
+        case MidiCin::CONTROL_CHANGE: {
+            uint8_t control = data[2];
+            uint8_t value   = data[3];
+            synth.controlChange(channel, control, value);
+            break;
+        }
+
+        case MidiCin::PROGRAM_CHANGE: {
+            uint8_t program = data[2];
+            synth.programChange(channel, program);
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+#endif
 
 #ifdef TASK_BENCHMARKING
 // globals to be unsafely shared between tasks
@@ -161,9 +216,7 @@ void handleSystemExclusive( uint8_t* data, size_t len) {
 // Core0 task -- AUDIO
 static void IRAM_ATTR audio_task(void *userData) {
     vTaskDelay(20); 
-    ESP_LOGI(TAG, "Starting Task1");
-
-
+ //   ESP_LOGI(TAG, "Starting Task1");
 
     while (true) {
         
@@ -198,10 +251,15 @@ static void IRAM_ATTR audio_task(void *userData) {
 // ========================== Core 1 Task 2 ===============================================================================================
 static void IRAM_ATTR control_task(void *userData) { 
     vTaskDelay(50);
-    ESP_LOGI(TAG, "Starting Task2");
+ //   ESP_LOGI(TAG, "Starting Task2");
     
     while (true) { 
-        MIDI.read();
+    #if MIDI_IN_DEV == USE_MIDI_STANDARD || MIDI_IN_DEV == USE_USB_MIDI_DEVICE
+    MIDI.read();
+#elif MIDI_IN_DEV == USE_USB_HOST
+    usbMidi.update();
+#endif
+   
         synth.updateScores();
 #ifdef ENABLE_RGB_LED
         updateLed();
@@ -229,7 +287,7 @@ static void IRAM_ATTR control_task(void *userData) {
             uint32_t avg_render = total_render / frame_count;
             uint32_t avg_write  = total_write  / frame_count;
 
-            ESP_LOGI(TAG, "Avg cycles over %u frames: render = %u, write = %u",
+         //   ESP_LOGI(TAG, "Avg cycles over %u frames: render = %u, write = %u",
                      frame_count, avg_render, avg_write);
 
             total_render = 0;
@@ -246,7 +304,7 @@ static void IRAM_ATTR control_task(void *userData) {
 // ========================== Core 1 Task 3 ===============================================================================================
 static void IRAM_ATTR gui_task(void *userData) { 
     vTaskDelay(50);
-    ESP_LOGI(TAG, "Starting Task3");
+//    ESP_LOGI(TAG, "Starting Task3");
     
     while (true) {
         if (gui_blocker == 0) {
@@ -261,14 +319,14 @@ static void IRAM_ATTR gui_task(void *userData) {
 // ========================== SETUP ===============================================================================================
 void setup() {
     if (!psramFound()) {
-      ESP_LOGE(TAG, "PSRAM not found!");
-      vTaskDelay(10);
-      while(true);
+  //      ESP_LOGE(TAG, "PSRAM not found!");
+        vTaskDelay(10);
+        while(true);
     }
     btStop(); 
-    
+
 #if MIDI_IN_DEV == USE_USB_MIDI_DEVICE
-  // Change USB Device Descriptor Parameter
+    // Set USB Device descriptors
     USB.VID(0x1209);
     USB.PID(0x1304);
     USB.productName("S3 SF2 Synth");
@@ -278,7 +336,15 @@ void setup() {
     USB.usbSubClass(0x00);
     USB.usbProtocol(0x00);
     USB.usbAttributes(0x80);
+
+    USB.begin();
+    delay(50);
+
+    //  ESP_LOGI(TAG, "USB MIDI Device started");
 #endif
+
+
+#if MIDI_IN_DEV == USE_MIDI_STANDARD || MIDI_IN_DEV == USE_USB_MIDI_DEVICE
 
     MIDI.begin(MIDI_CHANNEL_OMNI);
     MIDI.setHandleNoteOn(handleNoteOn);
@@ -289,53 +355,70 @@ void setup() {
     MIDI.setHandleSystemExclusive(handleSystemExclusive);
 
     delay(800);
-    ESP_LOGI(TAG, "MIDI started");
+    //   ESP_LOGI(TAG, "Standard MIDI started");
+#endif
+
+#if MIDI_IN_DEV == USE_USB_HOST
+    usbMidi.onMidiMessage(handleMidiMessage);
+
+    usbMidi.onDeviceConnected([]() {
+    //    ESP_LOGI(TAG, "USB MIDI device connected");
+    });
+
+    usbMidi.onDeviceDisconnected([]() {
+    //    ESP_LOGI(TAG, "USB MIDI device disconnected");
+    });
+
+    usbMidi.begin();
+#endif
 
   //  SDMMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_D0, SDMMC_D1, SDMMC_D2, SDMMC_D3)
     SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_D0, SDMMC_D1, SDMMC_D2, SDMMC_D3);
     if (!SD_MMC.begin()) {
-        ESP_LOGE(TAG, "SD init failed");
+//        ESP_LOGE(TAG, "SD init failed");
     } else {
-        ESP_LOGE(TAG, "SD initialized");
+//        ESP_LOGE(TAG, "SD initialized");
     }
 
     if (!LittleFS.begin()) {
-        ESP_LOGE(TAG, "LittleFS init failed");
+ //       ESP_LOGE(TAG, "LittleFS init failed");
     } else {
-        ESP_LOGE(TAG, "LittleFS initialized");
+ //       ESP_LOGE(TAG, "LittleFS initialized");
     }
+
 
 #ifdef ENABLE_GUI
     gui.begin();
     gui.busyMessage( "Synth Loading...");
-    ESP_LOGI(TAG, "GUI splash");
+//    ESP_LOGI(TAG, "GUI splash");
 #endif
 
 #ifdef ENABLE_REVERB
     reverb.init();
-    ESP_LOGI(TAG, "Reverb FX started");
+ //   ESP_LOGI(TAG, "Reverb FX started");
 #endif
 
 #ifdef ENABLE_DELAY
     delayfx.init();
-    ESP_LOGI(TAG, "Delay FX started");
+ //   ESP_LOGI(TAG, "Delay FX started");
 #endif
  
 
     synth.begin();
-    ESP_LOGI(TAG, "Synth is starting");
+ //   ESP_LOGI(TAG, "Synth is starting");
 
 #ifdef ENABLE_GUI
     gui.startMenu();
-    ESP_LOGI(TAG, "GUI started");
+ //  ESP_LOGI(TAG, "GUI started");
 #endif
 
+
     AudioPort.init(I2S_Audio::MODE_OUT);
-    ESP_LOGI(TAG, "I2S Audio port started");
+  //  ESP_LOGI(TAG, "I2S Audio port started");
 
 #ifdef ENABLE_RGB_LED
     setupLed();
-    ESP_LOGI(TAG, "RGB LED started");
+  //  ESP_LOGI(TAG, "RGB LED started");
 #endif
 
 
@@ -348,7 +431,7 @@ void setup() {
 
     vTaskDelay(30);
 
-    ESP_LOGI(TAG, "SF2 Synth ready");
+  //  ESP_LOGI(TAG, "SF2 Synth ready");
 }
 
 
@@ -356,3 +439,6 @@ void setup() {
 void loop() {
     vTaskDelete(NULL);
 }
+
+
+

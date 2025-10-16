@@ -1,3 +1,4 @@
+#ifdef ENABLE_GUI
 #include "TextGUI.h"
 #include "MenuStructure.h"
 
@@ -473,3 +474,4 @@ int TextGUI::partialDisplayUpdate() {
     return cur_xt + cur_yt;
 }
 
+#endif // ENABLE_GUI

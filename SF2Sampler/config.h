@@ -14,6 +14,7 @@
  *   - Optional SD card and/or LittleFS
  * 
  * Author: Evgeny Aslovskiy AKA Copych
+ * Usb midi host functionality added by Vadims Maksimovs AKA Ledlaux
  * License: MIT
  * Repository: https://github.com/copych/ESP32-S3_SF2_Sampler_Synthesizer
  * 
@@ -33,7 +34,8 @@
 // ===================== MIDI =======================================================================================
 #define   USE_USB_MIDI_DEVICE   1     // definition: the synth appears as a USB MIDI Device "S3 SF2 Synth"
 #define   USE_MIDI_STANDARD     2     // definition: the synth receives MIDI messages via serial 31250 bps
-#define   MIDI_IN_DEV           USE_USB_MIDI_DEVICE     // select the appropriate (one of the above) 
+#define   USE_USB_HOST          3
+#define   MIDI_IN_DEV           USE_USB_HOST // select the appropriate (one of the above) 
 #define   NUM_MIDI_CHANNELS		16
 
 // ===================== SYNTHESIZER ================================================================================
@@ -74,7 +76,7 @@ static const char* SF2_PATH = "/";
 #define SDMMC_D3  13
 
 // ===================== GUI SETTINGS ==========================================================================
-#define ENABLE_GUI
+// #define ENABLE_GUI
 
 #ifdef ENABLE_GUI
   #define DISPLAY_CONTROLLER SH1106
