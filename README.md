@@ -1,12 +1,30 @@
-This fork provides usb midi host function to the project author Copych code. Logs and gui are disabled. To change midi input mode and enable gui check config.h. For usb midi host function to work on ESP32-S3 enable usb host by soldering pad and in Arduino IDE change USB-Mode to USB-OTG(TinyUSB).
+# ESP32-S3 SoundFont (SF2) Sampler Synthesizer (Fork)
 
-For this fork USB midi host library code by Enudenki was used.
-https://github.com/enudenki/esp32-usb-host-midi-library
+An SF2 based wavetable synthesizer designed specifically for the ESP32-S3 microcontroller. This project leverages the enhanced memory capabilities of the ESP32-S3 (with PSRAM) to efficiently load and play SoundFont samples, providing a compact, affordable, and powerful sampler solution.
+
+---
+
+###  About This Fork
+This fork builds upon the original project by **Evgeny Aslovskiy (Copych)**, adding **USB MIDI host functionality** that allows the ESP32-S3 to interface directly with USB MIDI devices.
 
 
-# ESP32-S3 SoundFont (SF2) Sampler Synthesizer
+###  Key Changes
+- Added USB MIDI Host Support using [Enudenki’s ESP32 USB Host MIDI Library](https://github.com/enudenki/esp32-usb-host-midi-library)  `/src/usbhost`
+- Logs and GUI disabled for streamlined performance  
+- To change MIDI input mode or re-enable the GUI, edit `config.h`
 
-An SF2 (SoundFont 2) based wavetable synth designed specifically for the ESP32-S3 microcontroller. This project leverages the enhanced memory capabilities of the ESP32-S3 (with PSRAM) to efficiently load and play SoundFont samples, providing a compact and powerful sampler solution. It's cheap and simple, yet powerful.
+
+###  Enabling USB MIDI Host on ESP32-S3
+1. **Hardware setup** – Solder the **USB-OTG host pad** on your ESP32-S3 board.  
+2. **IDE configuration** – In the **Arduino IDE** select 
+   `Tools → USB Mode → USB-OTG (TinyUSB)`  
+
+
+
+###  License & Credits
+- **License:** MIT (same as upstream)  
+- **Upstream repository:** [Copych / ESP32-S3_SF2_Sampler_Synthesizer](https://github.com/copych/ESP32-S3_SF2_Sampler_Synthesizer)  
+  (Refer there for full project history, documentation, and original features.)
 
 ---
 

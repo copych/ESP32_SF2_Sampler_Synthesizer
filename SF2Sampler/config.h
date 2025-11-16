@@ -34,7 +34,7 @@
 // ===================== MIDI =======================================================================================
 #define   USE_USB_MIDI_DEVICE   1     // definition: the synth appears as a USB MIDI Device "S3 SF2 Synth"
 #define   USE_MIDI_STANDARD     2     // definition: the synth receives MIDI messages via serial 31250 bps
-#define   USE_USB_HOST          3
+#define   USE_USB_HOST          3     // definition: the synth receives MIDI from USB MIDI keyboard via USB-OTG port
 #define   MIDI_IN_DEV           USE_USB_HOST // select the appropriate (one of the above) 
 #define   NUM_MIDI_CHANNELS		16
 
@@ -135,3 +135,4 @@ static const char* SF2_PATH = "/";
 #else
   #define SIG_INPUT_MODE    INPUT_PULLDOWN  
 #endif
+
