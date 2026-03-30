@@ -51,8 +51,7 @@ These pins can be changed in config.h if needed
 
 ## SD CARD Pin Connections:
 
-ESP32-S3:
-These pins can be changed in config.h if needed
+ESP32-S3: these pins can be changed in config.h if needed
 
 | Signal | GPIO Pin |
 |--------|----------|
@@ -66,7 +65,7 @@ These pins can be changed in config.h if needed
 | GND    | GND  |
 
 
-ESP32-P4: fixed pins
+ESP32-P4: fixed pins, external 10k pull-up resistors are required
 
 | Signal | GPIO Pin |
 |--------|----------|
