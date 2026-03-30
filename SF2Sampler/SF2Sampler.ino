@@ -26,18 +26,24 @@
 
 static const char* TAG = "Main";
 
-
 #define FORMAT_LITTLEFS_IF_FAILED
 
+#include "config.h"
 #include <Arduino.h>
 #include "esp_task_wdt.h"
 #include <float.h>
-#include "config.h"
 #include "misc.h" 
 #include "esp_log.h"
 #include <FS.h>
+
 #include "SD_MMC.h"
 #include <LittleFS.h>
+
+#include "driver/gpio.h"
+#include "driver/sdmmc_host.h"
+#include "driver/sdmmc_defs.h"
+#include "sdmmc_cmd.h"
+
 #include <MIDI.h>
 #include "synth.h"
 #include "SF2Parser.h"
@@ -110,7 +116,7 @@ SynthState state {
 
 // ========================== GUI ==============================================================================================
 #ifdef ENABLE_GUI
-    #include "TextGui.h"
+    #include "TextGUI.h"
     TextGUI gui(synth, state);
 #endif
 
@@ -265,7 +271,7 @@ void setup() {
       vTaskDelay(10);
       while(true);
     }
-    btStop(); 
+    //btStop(); 
     
 #if MIDI_IN_DEV == USE_USB_MIDI_DEVICE
   // Change USB Device Descriptor Parameter
@@ -293,16 +299,20 @@ void setup() {
 
   //  SDMMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_D0, SDMMC_D1, SDMMC_D2, SDMMC_D3)
     SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_D0, SDMMC_D1, SDMMC_D2, SDMMC_D3);
+ 
     if (!SD_MMC.begin()) {
         ESP_LOGE(TAG, "SD init failed");
     } else {
-        ESP_LOGE(TAG, "SD initialized");
+        ESP_LOGI(TAG, "SD initialized");
+        int freq = 0;
+        sdmmc_host_get_real_freq(SDMMC_HOST_SLOT_0, &freq);
+        ESP_LOGI("", "SD freq: %u kHz", freq);
     }
 
-    if (!LittleFS.begin()) {
+    if (!LittleFS.begin(true)) {
         ESP_LOGE(TAG, "LittleFS init failed");
     } else {
-        ESP_LOGE(TAG, "LittleFS initialized");
+        ESP_LOGI(TAG, "LittleFS initialized");
     }
 
 #ifdef ENABLE_GUI

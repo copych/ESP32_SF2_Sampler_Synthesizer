@@ -84,6 +84,7 @@ private:
 
     fs::FS* getFileSystem() ;
 
-    FileSystemType fsType = FileSystemType::LITTLEFS;  // default
+//    FileSystemType fsType = FileSystemType::LITTLEFS;  // default
+    FileSystemType fsType = FileSystemType::SD;  // default
     std::vector<String> sf2Files;
 };

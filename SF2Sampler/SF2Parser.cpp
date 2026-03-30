@@ -730,7 +730,6 @@ bool SF2Parser::loadSampleDataToMemory() {
 }
 
 
-
 void SF2Parser::clear() {
     for (auto& sample : samples) {
         if (sample.data) {

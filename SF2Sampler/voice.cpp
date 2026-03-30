@@ -302,8 +302,7 @@ void Voice::updateScore() {
         return;
     }
 
-    float env = ampEnv.process();
-    score = env * velocityVolume;
+    score = ampEnv.getVal() * velocityVolume;
 
     if (!isRunning() || ampEnv.isIdle()) {
         score *= 0.1f;

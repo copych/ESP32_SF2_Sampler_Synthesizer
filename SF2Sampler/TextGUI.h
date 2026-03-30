@@ -120,7 +120,9 @@ private:
     SynthState& state;
     MuxEncoder encoder;
     MuxButton button;
+
     U8_OBJECT display;
+    
     bool editingValue = false;
     // Menu state
     std::vector<MenuContext> menuStack;

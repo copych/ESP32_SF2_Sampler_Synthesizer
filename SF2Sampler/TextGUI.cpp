@@ -1,6 +1,10 @@
+#include "config.h"
+
+#ifdef ENABLE_GUI
+
 #include "TextGUI.h"
 #include "MenuStructure.h"
-
+#include <SPI.h>
 #include <functional>
 #include <new> 
 
@@ -186,25 +190,59 @@ MenuItem MenuItem::Custom(const String& title,
 TextGUI::TextGUI(Synth& synthRef, SynthState& stateRef) :
       synth(synthRef)
     , state(stateRef)
-    , display(U8_ROTATE, U8X8_PIN_NONE, DISPLAY_SCL, DISPLAY_SDA)
+    , display(U8_INIT_ARGS)
     , encA(0), encB(0), btnState(0)
     {}
 
 
 void TextGUI::begin() {
+
     pinMode(ENC0_A_PIN, SIG_INPUT_MODE);
     pinMode(ENC0_B_PIN, SIG_INPUT_MODE);
     pinMode(BTN0_PIN, SIG_INPUT_MODE);
+
+#if defined(DISPLAY_INTERFACE_HW_I2C)
+
+    // HW I2C: peripheral controls pins
+    Wire.begin(DISPLAY_SDA, DISPLAY_SCL);
+
+#elif defined(DISPLAY_INTERFACE_SW_I2C)
+
+    // SW I2C: u8g2 bitbang > we must drive pins
     pinMode(DISPLAY_SDA, OUTPUT);
     pinMode(DISPLAY_SCL, OUTPUT);
-    
-    display.begin(); 
+    digitalWrite(DISPLAY_SDA, HIGH);
+    digitalWrite(DISPLAY_SCL, HIGH);
+
+#elif defined(DISPLAY_INTERFACE_HW_SPI)
+
+    // HW SPI: init bus (use custom pins if needed)
+    // SPI.begin(); 
+    // or:
+    SPI.begin(DISPLAY_SCL, U8X8_PIN_NONE, DISPLAY_SDA, DISPLAY_CS);
+
+#elif defined(DISPLAY_INTERFACE_SW_SPI)
+
+    // SW SPI: u8g2 bitbang > we must drive pins
+    pinMode(DISPLAY_SCL, OUTPUT);   // CLK
+    pinMode(DISPLAY_SDA, OUTPUT);   // MOSI
+    pinMode(DISPLAY_CS, OUTPUT);
+    pinMode(DISPLAY_DC, OUTPUT);
+    if (DISPLAY_RES != U8X8_PIN_NONE)
+        pinMode(DISPLAY_RES, OUTPUT);
+
+    digitalWrite(DISPLAY_SCL, LOW);
+    digitalWrite(DISPLAY_SDA, LOW);
+
+#endif
+
+    display.begin();
+
     display.setContrast(255);
     display.setFont(u8g2_font_6x12_m_symbols);
     display.enableUTF8Print();
     display.setDrawColor(2);
     display.setFontPosTop();
-
 
     inited = true;
 }
@@ -473,3 +511,4 @@ int TextGUI::partialDisplayUpdate() {
     return cur_xt + cur_yt;
 }
 
+#endif

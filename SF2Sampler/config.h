@@ -54,41 +54,82 @@
 #define FILTER_MAX_Q 7.0f
 
 static const char* SF2_PATH = "/"; 
+
 #define DEFAULT_CONFIG_FILE "/default_config.bin"
-// ===================== MIDI PINS ==================================================================================
-#define MIDI_IN         15      // if USE_MIDI_STANDARD is selected as MIDI_IN, this pin receives MIDI messages
 
-// ===================== I2S PINS ===================================================================================
-#define I2S_BCLK_PIN    5       // I2S BIT CLOCK pin (BCL BCK CLK)
-#define I2S_DOUT_PIN    6       // MCU Data Out: connect to periph. DATA IN (DIN D DAT)
-#define I2S_WCLK_PIN    7       // I2S WORD CLOCK pin (WCK WCL LCK)
-#define I2S_DIN_PIN     -1      // MCU Data In: connect to periph. DATA OUT (DOUT D SD)
 
-// ===================== SD MMC PINS ================================================================================
-// ESP32S3 allows almost any GPIOs for any particular needs
-#define SDMMC_CMD 38
-#define SDMMC_CLK 39
-#define SDMMC_D0  10
-#define SDMMC_D1  11
-#define SDMMC_D2  12
-#define SDMMC_D3  13
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  // ===================== MIDI PINS ==================================================================================
+  #define MIDI_IN         15      // if USE_MIDI_STANDARD is selected as MIDI_IN, this pin receives MIDI messages
+
+  // ===================== I2S PINS ===================================================================================
+  #define I2S_BCLK_PIN    5       // I2S BIT CLOCK pin (BCL BCK CLK)
+  #define I2S_DOUT_PIN    6       // MCU Data Out: connect to periph. DATA IN (DIN D DAT)
+  #define I2S_WCLK_PIN    7       // I2S WORD CLOCK pin (WCK WCL LCK)
+  #define I2S_DIN_PIN     -1      // MCU Data In: connect to periph. DATA OUT (DOUT D SD)
+
+  // ===================== SD MMC PINS ================================================================================
+  // ESP32S3 allows almost any GPIOs for any particular needs
+  #define SDMMC_CMD 38
+  #define SDMMC_CLK 39
+  #define SDMMC_D0  10
+  #define SDMMC_D1  11
+  #define SDMMC_D2  12
+  #define SDMMC_D3  13
+
+#else if defined(CONFIG_IDF_TARGET_ESP32P4)
+
+  #define MIDI_IN         15      // if USE_MIDI_STANDARD is selected as MIDI_IN, this pin receives MIDI messages
+
+  // ===================== I2S PINS ===================================================================================
+  #define I2S_BCLK_PIN    47       // I2S BIT CLOCK pin (BCL BCK CLK)
+  #define I2S_DOUT_PIN    46       // MCU Data Out: connect to periph. DATA IN (DIN D DAT)
+  #define I2S_WCLK_PIN    45       // I2S WORD CLOCK pin (WCK WCL LCK)
+  #define I2S_DIN_PIN     -1      // MCU Data In: connect to periph. DATA OUT (DOUT D SD)
+  
+  // ===================== SD MMC PINS ================================================================================
+  // ESP32P4 SPI slot 1 is locked to hardware pins
+  #define SDMMC_CMD 44
+  #define SDMMC_CLK 43
+  #define SDMMC_D0  39
+  #define SDMMC_D1  40
+  #define SDMMC_D2  41
+  #define SDMMC_D3  42
+#endif
+/*
+*/
+
 
 // ===================== GUI SETTINGS ==========================================================================
 #define ENABLE_GUI
 
 #ifdef ENABLE_GUI
+	// choose the right one according to your hardware setup
+   #define DISPLAY_INTERFACE_HW_SPI // 7 pins
+  // #define DISPLAY_INTERFACE_SW_SPI // 7 pins
+  // #define DISPLAY_INTERFACE_HW_I2C // 4 pins
+  // #define DISPLAY_INTERFACE_SW_I2C // 4 pins
+
   #define DISPLAY_CONTROLLER SH1106
   // #define DISPLAY_CONTROLLER SSD1306
 
   #define ACTIVE_STATE  LOW   // LOW = switch connects to GND, HIGH = switch connects to 3V3
 
-  #define BTN0_PIN 	14
-  #define ENC0_A_PIN 	15
-  #define ENC0_B_PIN 	16
+  #define BTN0_PIN 	35
+  #define ENC0_A_PIN 	23
+  #define ENC0_B_PIN 	22
 
-  #define DISPLAY_SDA 8 // SDA GPIO
-  #define DISPLAY_SCL 9 // SCL GPIO
+// display signal wires
+	// the two used both in SPI and I2C
+  #define DISPLAY_SDA 19 // SDA (MOSI) GPIO
+  #define DISPLAY_SCL 18 // SCL (SCK) GPIO
+  
+	// SPI specific pins
+  #define DISPLAY_CS  4 // CS GPIO 
+  #define DISPLAY_DC  5 // DC GPIO
+  #define DISPLAY_RES 3 // RES (RST, RESET) GPIO , this pin is not mandatory, but it's better to have one defined
 
+// display dimensions and layout
   #define DISPLAY_W 128
   #define DISPLAY_H 64
   #define DISPLAY_ROTATE 0 // can be 0, 90, 180 or 270
@@ -108,6 +149,9 @@ static const char* SF2_PATH = "/";
 
 
 
+
+
+
 // !!!!!!!!!!!!!=======  DO NOT CHANGE  =======!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 // U8G2 CONSTRUCTOR MACROS
 #if (DISPLAY_ROTATE == 180)
@@ -120,10 +164,34 @@ static const char* SF2_PATH = "/";
   #define U8_ROTATE U8G2_R0
 #endif
 
+
+// INTERFACE SELECTION
+
+#if defined(DISPLAY_INTERFACE_HW_I2C)
+  #define DISPLAY_INTERFACE HW_I2C
+  #define U8_INIT_ARGS U8_ROTATE, U8X8_PIN_NONE, DISPLAY_SCL, DISPLAY_SDA
+
+#elif defined(DISPLAY_INTERFACE_HW_SPI)
+  #define DISPLAY_INTERFACE 4W_HW_SPI
+  #define U8_INIT_ARGS U8_ROTATE, DISPLAY_CS, DISPLAY_DC, DISPLAY_RES
+  
+#elif defined(DISPLAY_INTERFACE_SW_I2C)
+  #define DISPLAY_INTERFACE SW_I2C
+  #define U8_INIT_ARGS U8_ROTATE, DISPLAY_SCL, DISPLAY_SDA, U8X8_PIN_NONE
+
+#elif defined(DISPLAY_INTERFACE_SW_SPI)
+  #define DISPLAY_INTERFACE 4W_SW_SPI
+  #define U8_INIT_ARGS U8_ROTATE, DISPLAY_SCL, DISPLAY_SDA, DISPLAY_CS, DISPLAY_DC, DISPLAY_RES
+#else
+  #error "Display interface not defined"
+#endif
+
+
 #define W_H_DIV X
-#define _U8_CONCAT(ctrl, w, div, h) U8G2_ ## ctrl ## _ ## w ## div ## h ## _NONAME_F_HW_I2C
-#define U8_CONCAT(ctrl, w, div, h) _U8_CONCAT(ctrl, w, div, h)
-#define U8_OBJECT U8_CONCAT(DISPLAY_CONTROLLER, DISPLAY_W, W_H_DIV, DISPLAY_H)
+
+#define _U8_CONCAT(ctrl, w, div, h, ifc) U8G2_ ## ctrl ## _ ## w ## div ## h ## _NONAME_F_ ## ifc
+#define U8_CONCAT(ctrl, w, div, h, ifc) _U8_CONCAT(ctrl, w, div, h, ifc)
+#define U8_OBJECT U8_CONCAT(DISPLAY_CONTROLLER, DISPLAY_W, W_H_DIV, DISPLAY_H, DISPLAY_INTERFACE)
 
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
