@@ -28,8 +28,8 @@ static const char* TAG = "Main";
 
 #define FORMAT_LITTLEFS_IF_FAILED
 
-#include "config.h"
 #include <Arduino.h>
+#include "config.h"
 #include "esp_task_wdt.h"
 #include <float.h>
 #include "misc.h" 
