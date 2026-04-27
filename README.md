@@ -22,14 +22,14 @@ The ESP32 SF2 Sampler is a sampler firmware that runs on the ESP32S3 / ESP32P4 v
 - **Effects**: Reverb (CC#91), Chorus (CC#93), Delay (CC#95).
 - **MIDI control**: GM, partially GS/XG-compatible CCs, PC, RPNs, drums on ch.10, GM reset.
 - **External DAC**: Works with PCM5102 and similar I2S DACs.
-- **ESP32-S3 optimized**: Dual-core, PSRAM, minimal wiring.
+- **ESP32-S3 / P4 optimized**: Dual-core, PSRAM, minimal wiring.
 - **Optional OLED GUI**: Use a rotary encoder and a button to navigate. 
 
 ---
 
 ## Hardware Requirements
 
-- **ESP32-S3 microcontroller** with PSRAM (OPI PSRAM recommended)
+- **ESP32-S3 or ESP32-P4 microcontroller** with PSRAM (OPI PSRAM recommended)
 - **External DAC** (e.g., PCM5102)
 - USB connection for MIDI and power
 
