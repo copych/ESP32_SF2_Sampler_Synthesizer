@@ -31,6 +31,14 @@
 extern SamplePool samplePool;
 static const char* TAG = "Voice";
 
+// Audio-thread diagnostics: increment only on an already exceptional path.
+// Reporting is performed from Core1; never log from nextSample().
+static volatile uint32_t gVoiceBadFetchCount = 0;
+
+uint32_t takeVoiceBadFetchCount() {
+    return __atomic_exchange_n(&gVoiceBadFetchCount, 0, __ATOMIC_RELAXED);
+}
+
 inline float velocityToGain(uint32_t velocity) {
     //    return velocity * velocity * DIV_127 * DIV_127; // square velocity 
     return velocity * DIV_127; // linear velocity
@@ -126,8 +134,11 @@ void Voice::prepareStart(uint8_t ch, uint8_t note_, uint8_t vel, const Zone& z, 
     int32_t loopEndOffset   = zone.loopEndOffset   + (zone.loopEndCoarseOffset << 15);
 
     length    = sampleHandle->length;
-    loopStart = sampleHandle->loopStart + loopStartOffset;
-    loopEnd   = sampleHandle->loopEnd   + loopEndOffset;
+    // phase is intentionally 1-based in nextSample(): phase == 1.0f maps
+    // to data[0] because interpolation reads data[idx - 1] / data[idx].
+    // SF2/SamplePool loop points are 0-based, so convert them once here.
+    loopStart = sampleHandle->loopStart + loopStartOffset + 1;
+    loopEnd   = sampleHandle->loopEnd   + loopEndOffset   + 1;
     loopLength = loopEnd - loopStart;
 
     loopType = static_cast<LoopType>(zone.sampleModes & 0x0003);
@@ -227,8 +238,9 @@ float __attribute__((hot,always_inline)) IRAM_ATTR Voice::nextSample() {
         return 0.0f;
     }
 
-    updatePitch();
-    
+    // effectivePhaseIncrement is prepared on Core1 by updateScores().
+    // Keep pitch-factor math out of the per-sample audio hot path.
+
     // for syncing time-based functions (like LFOs)
     samplesRun++;
     
@@ -242,28 +254,11 @@ if (__builtin_expect(
         idx == 0 ||
         idx >= (uint32_t)length,
         0)) {
-
-    ESP_EARLY_LOGE(
-        "VOICE",
-        "BAD FETCH v=%u active=%d handle=%p data=%p "
-        "phase=%f idx=%u len=%f sid=%u loop=%u",
-        id,
-        active,
-        sampleHandle,
-        data,
-        phase,
-        idx,
-        length,
-        sampleID,
-        loopType
-    );
-
+    // Never format/log from Core0. Count the fault and let Core1 report it.
+    __atomic_fetch_add(&gVoiceBadFetchCount, 1, __ATOMIC_RELAXED);
     active = false;
     return 0.0f;
 }
-
-
-
 
 
     // float s0 = data[(idx > 0) ? (idx - 1) : 0];
@@ -277,7 +272,9 @@ if (__builtin_expect(
 
     // Envelope process
     float env = ampEnv.process();
-    float val = smp * velocityVolume * env * (*modVolume) * (*modExpression);
+    // Velocity / channel volume / expression are applied once per voice block
+    // in Synth::renderLRBlock(). Do not apply them again per sample here.
+    float val = smp * env;
 
 #ifdef ENABLE_IN_VOICE_FILTERS
     val = filter.process(val);

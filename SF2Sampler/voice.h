@@ -40,6 +40,9 @@ enum LoopType {
     PING_PONG_LOOP = 4 // never used
 };
 
+// Returns and clears BAD FETCH events accumulated by Core0. Call from Core1 only.
+uint32_t takeVoiceBadFetchCount();
+
 struct DRAM_ATTR Voice {
     float phase = 0.0f; 
     float velocityVolume = 1.0f;

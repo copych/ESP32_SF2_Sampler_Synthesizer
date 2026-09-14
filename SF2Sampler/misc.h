@@ -277,6 +277,20 @@ static inline float fclamp(float in, float minv, float maxv){
   return in;
 }
 
+
+struct dcBlocker {
+    float x1 = 0.0f;
+    float y1 = 0.0f;
+
+    inline float process(float x) {
+        const float y = x - x1 + 0.995f * y1;
+        x1 = x;
+        y1 = y;
+        return y;
+    }
+};
+
+
 static inline float pitchBendRatio(int value, float range = 2.0f) {
     return powf(2.0f, (range * (value - PITCH_BEND_CENTER) * DIV_8192) * DIV_12 );
 }

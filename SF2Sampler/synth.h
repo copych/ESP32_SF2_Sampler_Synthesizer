@@ -79,7 +79,7 @@ public:
     void setAudioAssetPaused(bool paused);
 
 private:
-    
+    dcBlocker dcL, dcR;
     String currentSf2Path;  // full path of currently loaded SF2 file
     float volume_scaler = 0.5f ;
     int currentFileIndex = -1;

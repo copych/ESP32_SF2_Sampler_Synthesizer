@@ -74,16 +74,16 @@ static void dump_mem_caps(const char* tag)
     size_t largest_dma    = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
     size_t largest_spiram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
 
-    ESP_LOGI("MEM",
-        "[%s] free: 8bit=%u dma=%u psram=%u | largest: 8bit=%u dma=%u psram=%u",
-        tag,
-        (unsigned)free_8bit,
-        (unsigned)free_dma,
-        (unsigned)free_spiram,
-        (unsigned)largest_8bit,
-        (unsigned)largest_dma,
-        (unsigned)largest_spiram
-    );
+//    ESP_LOGI("MEM",
+ //       "[%s] free: 8bit=%u dma=%u psram=%u | largest: 8bit=%u dma=%u psram=%u",
+  //      tag,
+  //      (unsigned)free_8bit,
+  //      (unsigned)free_dma,
+  //      (unsigned)free_spiram,
+  //      (unsigned)largest_8bit,
+  //      (unsigned)largest_dma,
+  //      (unsigned)largest_spiram
+  //  );
 }
 
 #ifdef ENABLE_CH_FILTER_M
@@ -109,6 +109,9 @@ static void dump_mem_caps(const char* tag)
 extern SamplePool samplePool;
 
 static const char* TAG = "Synth";
+
+// Incremented only on the exceptional Core0 voice-lock miss path.
+static volatile uint32_t gVoiceLockMissCount = 0;
 
 Synth::Synth(SF2Parser& parserRef) : parser(parserRef) {
     // Initialize all 16 MIDI channels with default values
@@ -814,7 +817,11 @@ void   __attribute__((hot,always_inline)) IRAM_ATTR Synth::renderLRBlock(float* 
 
         // Core0 owns this Voice for the whole per-voice audio block. Core1
         // lifetime/restart mutations take the same lock, so nextSample() never sees partial state.
-        if (__builtin_expect(!voice.tryLockState(), 0)) continue;
+        if (__builtin_expect(!voice.tryLockState(), 0)) {
+            // Exceptional path only: count it, never log or wait on Core0.
+            __atomic_fetch_add(&gVoiceLockMissCount, 1, __ATOMIC_RELAXED);
+            continue;
+        }
         if (__builtin_expect(!voice.active || !voice.sampleHandle || !voice.data, 0)) {
             voice.unlockState();
             continue;
@@ -922,6 +929,7 @@ void   __attribute__((hot,always_inline)) IRAM_ATTR Synth::renderLRBlock(float* 
     for (int i = 0; i < DMA_BUFFER_LEN; ++i) {
         outL[i] = dryL[i];
         outR[i] = dryR[i];
+
 #ifdef ENABLE_CHORUS
         outL[i] += choL[i]; outR[i] += choR[i];
 #endif
@@ -931,6 +939,13 @@ void   __attribute__((hot,always_inline)) IRAM_ATTR Synth::renderLRBlock(float* 
 #ifdef ENABLE_DELAY
         outL[i] += delL[i]; outR[i] += delR[i];
 #endif
+
+        outL[i] = dcL.process(outL[i]);
+        outR[i] = dcR.process(outR[i]);
+
+        outL[i] = limited(outL[i]);
+        outR[i] = limited(outR[i]);
+
     }
 }
 
@@ -987,8 +1002,24 @@ void Synth::updateScores() {
     for (Voice& v : voices) {
         v.updateScore();
         if (!v.active) continue;
-        v.updatePitch();
+        // Core1: update slow pitch factors first, then publish the final
+        // phase increment consumed directly by Core0 nextSample().
         v.updatePitchFactors();
+        v.updatePitch();
+    }
+
+    // Diagnostics are reported from Core1 only. No serial/log formatting occurs
+    // on the audio core. Keep reporting sparse and silent when nothing happened.
+    static uint32_t nextVoiceDiagMs = 0;
+    const uint32_t now = millis();
+    if ((int32_t)(now - nextVoiceDiagMs) >= 0) {
+        nextVoiceDiagMs = now + 1000;
+
+        const uint32_t lockMisses = __atomic_exchange_n(&gVoiceLockMissCount, 0, __ATOMIC_RELAXED);
+        const uint32_t badFetches = takeVoiceBadFetchCount();
+        if (lockMisses || badFetches) {
+            ESP_LOGW(TAG, "[AUDIO DIAG] voiceLockMiss=%u badFetch=%u", lockMisses, badFetches);
+        }
     }
 }
 

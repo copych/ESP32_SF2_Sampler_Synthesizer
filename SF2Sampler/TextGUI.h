@@ -56,11 +56,12 @@ public:
     static MenuItem Action(const String&, MenuAction);
     static MenuItem Value(const String&, ValueGetter, ValueSetter, int, int, int);
     static MenuItem Toggle(const String&, ValueGetter, ValueSetter);
-    static MenuItem Submenu(const String&, MenuGenerator);
+    static MenuItem Submenu(const String&, MenuGenerator, bool showBusy = false);
     static MenuItem Custom(const String&, std::function<void(TextGUI&, U8G2&, int, int)>, MenuAction = nullptr);
 
     String title;
     MenuItemType type;
+    bool showBusy = false;
 
     union {
         struct {
@@ -99,6 +100,8 @@ public:
     void draw();
     void fullUpdate();
     void busyMessage(const String& str);
+    void beginBusy(const String& str = "Waiting...");
+    void endBusy();
 
     // Navigation methods
     void enterSubmenu(std::vector<MenuItem>&& items, const String& title = "");
@@ -128,6 +131,7 @@ private:
     std::vector<MenuContext> menuStack;
     int cursorPos = 0;
     bool needsRedraw = true;
+    volatile bool busy = false;
     
 
     // Initial menu setup

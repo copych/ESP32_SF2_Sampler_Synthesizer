@@ -24,6 +24,7 @@ MenuItem::MenuItem(MenuItem&& other) noexcept {
 MenuItem::MenuItem(const MenuItem& other) {
     title = other.title;
     type = other.type;
+    showBusy = other.showBusy;
     switch (type) {
         case MenuItemType::VALUE:
         case MenuItemType::TOGGLE:
@@ -95,6 +96,7 @@ void MenuItem::destroyCurrent() {
 void MenuItem::moveFrom(MenuItem&& other) {
     title = std::move(other.title);
     type = other.type;
+    showBusy = other.showBusy;
 
     switch (type) {
         case MenuItemType::VALUE:
@@ -124,10 +126,11 @@ void MenuItem::moveFrom(MenuItem&& other) {
 
 
 // Factory methods
-MenuItem MenuItem::Submenu(const String& title, MenuGenerator generator) {
+MenuItem MenuItem::Submenu(const String& title, MenuGenerator generator, bool showBusy) {
     MenuItem item{};
     item.title = title;
     item.type = MenuItemType::SUBMENU;
+    item.showBusy = showBusy;
     new (&item.submenu.generator) MenuGenerator(std::move(generator));
     return item;
 }
@@ -263,12 +266,14 @@ void TextGUI::startMenu() {
 }
 
 void TextGUI::process() {
+    if (busy) return;
     encoder.process();
     button.process();
 
 }
 
 void TextGUI::draw() {
+    if (busy) return;
     if (partialDisplayUpdate() == 0) {
         renderDisplay();
     }
@@ -388,6 +393,19 @@ void TextGUI::busyMessage(const String& str) {
     display.sendBuffer();
 }
 
+void TextGUI::beginBusy(const String& str) {
+    busy = true;
+    display.clearBuffer();
+    display.drawUTF8(0, display.getDisplayHeight() / 2, str.c_str());
+    display.sendBuffer();
+}
+
+void TextGUI::endBusy() {
+    busy = false;
+    needsRedraw = true;
+    fullUpdate();
+}
+
 void TextGUI::goBack() {
     if (menuStack.size() > 1) {
         menuStack.pop_back();
@@ -418,7 +436,11 @@ void TextGUI::onButtonEvent(MuxButton::btnEvents evt) {
         switch (item.type) {
             case MenuItemType::SUBMENU:
                 if (item.submenu.generator) {
-                    enterSubmenu(item.submenu.generator(), item.title);
+                    const bool showBusy = item.showBusy;
+                    if (showBusy) beginBusy("Scanning...");
+                    auto items = item.submenu.generator();
+                    enterSubmenu(std::move(items), item.title);
+                    if (showBusy) endBusy();
                 }
                 break;
                 
