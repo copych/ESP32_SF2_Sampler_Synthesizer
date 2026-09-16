@@ -1,5 +1,7 @@
-THIS BRANCH IS EXPERIMENTAL.
-THE IDEA IS TO USE LESS RAM, ONLY PRE-LOADING THE REQUIRED SAMPLES ON PROGRAM CHANGE
+# The new features
+- **Savvy samples loading**: loads only the samples for the instruments requested by Program Change MIDI events
+- **Loading meter**: the gauge indicates SF2 loading progress, so you can be sure that it's working.
+- **Custom partitions**: the project now includes partitions.csv with the optimal layout for the common 16MB flash boards. If you don't have one, you'd better delete this file from your clonned project
 
 # ESP32 SoundFont (SF2) Sampler Synthesizer
 
@@ -17,8 +19,8 @@ The ESP32 SF2 Sampler is a sampler firmware that runs on the ESP32S3 / ESP32P4 v
 
 ## Features
 
-- **SF2 playback**: Load SoundFont2 banks up to PSRAM size.
-- **Filesystem**: Runtime switch between LittleFS and fast 4-bit SD_MMC.
+- **SF2 playback**: Load SoundFont2 banks of MORE than PSRAM size.
+- **Filesystem**: Runtime switch between LittleFS and SD_MMC (fast 4-bit bus supported).
 - **USB MIDI**: Plug-and-play MIDI device support.
 - **Per-voice filters**: Optional biquad LPF (configurable in `config.h`).
 - **Per-channel filters**: Optional CC#74/71-controlled LPF/resonance.
