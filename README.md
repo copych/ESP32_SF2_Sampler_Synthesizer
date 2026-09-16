@@ -11,7 +11,7 @@ An SF2 (SoundFont 2) based wavetable synth designed specifically for the ESP32-S
 
 ##  About This Fork
 
-This fork builds upon the original project by **Evgeny Aslovskiy (Copych)**, adding **USB MIDI host functionality** that allows the ESP32-S3 to interface directly with USB MIDI devices. MIDI input mode can be changed in config file. 
+This fork builds upon the original project by **Evgeny Aslovskiy (Copych)**, adding **USB MIDI host functionality** that allows the ESP32-S3 to interface directly with USB MIDI devices. MIDI input mode can be changed in config file. ESP32-P4 is not tested.
 
 ##  Enabling USB MIDI Host on ESP32-S3
 1. **Hardware setup** – Solder the **USB-OTG host pad** on your ESP32-S3 board.
