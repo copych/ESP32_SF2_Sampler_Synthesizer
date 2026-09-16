@@ -56,6 +56,9 @@ struct SampleFreeRange {
 
 class SamplePool {
 public:
+    inline uint32_t capacityBytes() const { return totalBytes; }
+    static constexpr uint32_t maxEntries() { return HASH_SIZE; }
+
     bool init(uint32_t reserveBytes) {
         deinit();
 
@@ -399,3 +402,4 @@ private:
         return firstDeleted;
     }
 };
+

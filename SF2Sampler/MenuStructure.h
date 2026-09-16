@@ -335,6 +335,10 @@ std::vector<MenuItem> createRootMenu(Synth& synth, SynthState& state) {
     // System
     menu.push_back(MenuItem::Submenu("System", [&synth]() {
         return std::vector<MenuItem>{
+            MenuItem::Value("Full load",
+                [&synth]() { return synth.getSampleLoadMode() == SampleLoadMode::FULL_IF_FITS ? 1 : 0; },
+                [&synth](int v) { synth.setSampleLoadMode(v ? SampleLoadMode::FULL_IF_FITS : SampleLoadMode::PRESET_ONLY); },
+                0, 1, 1),
             MenuItem::Action("Save Settings", [&synth](TextGUI& gui) {
                 gui.beginBusy("Saving setup...");
                 synth.saveSynthState();

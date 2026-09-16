@@ -32,6 +32,11 @@ enum class FileSystemType {
     SD
 };
 
+enum class SampleLoadMode : uint8_t {
+    PRESET_ONLY = 0,
+    FULL_IF_FITS = 1
+};
+
 class DRAM_ATTR Synth {
 public:
 
@@ -69,6 +74,9 @@ public:
     bool loadSynthState(const char* path=DEFAULT_CONFIG_FILE);
     bool saveSynthState(const char* path=DEFAULT_CONFIG_FILE);
     const String& getCurrentSf2Path() const { return currentSf2Path; }
+    SampleLoadMode getSampleLoadMode() const { return sampleLoadMode; }
+    void setSampleLoadMode(SampleLoadMode mode) { sampleLoadMode = mode; }
+    bool isSf2FullyResident() const { return sf2FullyResident; }
 
     // Asset residency changes run on Core1 while audio renders on Core0.
     // These form a block-boundary handshake: Core1 never invalidates PCM
@@ -95,8 +103,13 @@ private:
 //    FileSystemType fsType = FileSystemType::LITTLEFS;  // default
     FileSystemType fsType = FileSystemType::SD;  // default
     std::vector<String> sf2Files;
+    SampleLoadMode sampleLoadMode = SampleLoadMode::PRESET_ONLY;
+    bool sf2FullyResident = false;
+
+    bool tryLoadFullSf2();
 
     volatile bool assetUpdateRequested = false;
     volatile bool audioAssetPaused = false;
     uint8_t assetUpdateDepth = 0;
 };
+

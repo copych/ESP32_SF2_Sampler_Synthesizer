@@ -74,16 +74,16 @@ static void dump_mem_caps(const char* tag)
     size_t largest_dma    = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
     size_t largest_spiram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
 
-    ESP_LOGI("MEM",
-        "[%s] free: 8bit=%u dma=%u psram=%u | largest: 8bit=%u dma=%u psram=%u",
-        tag,
-        (unsigned)free_8bit,
-        (unsigned)free_dma,
-        (unsigned)free_spiram,
-        (unsigned)largest_8bit,
-        (unsigned)largest_dma,
-        (unsigned)largest_spiram
-    );
+  //  ESP_LOGI("MEM",
+  //      "[%s] free: 8bit=%u dma=%u psram=%u | largest: 8bit=%u dma=%u psram=%u",
+  //      tag,
+  //      (unsigned)free_8bit,
+  //      (unsigned)free_dma,
+  //      (unsigned)free_spiram,
+  //      (unsigned)largest_8bit,
+  //      (unsigned)largest_dma,
+  //      (unsigned)largest_spiram
+  //  );
 }
 
 #ifdef ENABLE_CH_FILTER_M
@@ -186,6 +186,8 @@ bool Synth::begin() {
         return false;
     }
 
+    tryLoadFullSf2();
+
     for (int ch = 0; ch < 16; ++ch) {
         programChange(ch, channels[ch].program);
     }
@@ -283,8 +285,8 @@ void Synth::noteOn(uint8_t ch, uint8_t note, uint8_t vel) {
                                  ch, note, zone.sampleID);
                         continue;
                     }
-                    ESP_LOGI("NOTE", "ACQUIRE OK ch=%u note=%u sid=%u ptr=%p len=%u rate=%u",
-                             ch, note, zone.sampleID, h->data, h->length, h->sampleRate);
+            //        ESP_LOGI("NOTE", "ACQUIRE OK ch=%u note=%u sid=%u ptr=%p len=%u rate=%u",
+            //                 ch, note, zone.sampleID, h->data, h->length, h->sampleRate);
 
                     float score = vel * DIV_127;
                     Voice* v = allocateVoice(ch, note, score, zone.exclusiveClass);
@@ -295,8 +297,8 @@ void Synth::noteOn(uint8_t ch, uint8_t note, uint8_t vel) {
                         v->startNew(ch, note, vel, zone, chan);
                         uint32_t started = v->active;
                         v->unlockState();
-                        ESP_LOGI("NOTE", "VOICE START ch=%u note=%u sid=%u voice=%p active=%u",
-                                 ch, note, zone.sampleID, v, (unsigned)started);
+             //           ESP_LOGI("NOTE", "VOICE START ch=%u note=%u sid=%u voice=%p active=%u",
+             //                    ch, note, zone.sampleID, v, (unsigned)started);
                     } else {
                         ESP_LOGE("NOTE", "VOICE ALLOC FAIL ch=%u note=%u sid=%u", ch, note, zone.sampleID);
                         samplePool.release(zone.sampleID);
@@ -595,6 +597,84 @@ void Synth::applyBankProgram(uint8_t ch) {
     }
 }
 
+bool Synth::tryLoadFullSf2() {
+    sf2FullyResident = false;
+    if (sampleLoadMode != SampleLoadMode::FULL_IF_FITS) {
+        ESP_LOGI("SF2", "sample loading: preset only");
+        return false;
+    }
+
+    auto& all = parser.getSamples();
+    uint64_t requiredBytes = 0;
+    uint32_t validSamples = 0;
+
+    for (const auto& sample : all) {
+        if (sample.end <= sample.start) continue;
+        const uint64_t payload = (uint64_t)(sample.end - sample.start) * sizeof(int16_t);
+        requiredBytes += (payload + 3ULL) & ~3ULL;
+        ++validSamples;
+    }
+
+    const uint32_t capacity = samplePool.capacityBytes();
+    if (requiredBytes > capacity || validSamples > SamplePool::maxEntries()) {
+        ESP_LOGI("SF2",
+                 "full load skipped: PCM=%llu KB pool=%u KB samples=%u maxEntries=%u - preset loading",
+                 (unsigned long long)(requiredBytes >> 10),
+                 (unsigned)(capacity >> 10),
+                 (unsigned)validSamples,
+                 (unsigned)SamplePool::maxEntries());
+        return false;
+    }
+
+    ESP_LOGI("SF2", "full load: PCM=%llu KB pool=%u KB samples=%u",
+             (unsigned long long)(requiredBytes >> 10),
+             (unsigned)(capacity >> 10),
+             (unsigned)validSamples);
+
+    LoadingProgress::begin(requiredBytes);
+    for (auto& sample : all) {
+        if (sample.end <= sample.start) continue;
+
+        const uint32_t sid = sample.sampleID;
+        SampleHandle* h = parser.readSampleIntoPool(sid);
+        if (!h || !h->data) {
+            ESP_LOGW("SF2", "full load failed at sid=%u - falling back to preset loading", sid);
+            LoadingProgress::finish();
+
+            for (auto& s : all) {
+                s.data = nullptr;
+                s.refCount = 0;
+            }
+            samplePool.reset();
+            return false;
+        }
+
+        // One permanent pool reference pins every sample for the lifetime of
+        // this SF2. Channel and voice references remain independent.
+        h = samplePool.acquire(sid);
+        if (!h || !h->data) {
+            ESP_LOGW("SF2", "full-load pin failed at sid=%u - falling back to preset loading", sid);
+            LoadingProgress::finish();
+            for (auto& s : all) {
+                s.data = nullptr;
+                s.refCount = 0;
+            }
+            samplePool.reset();
+            return false;
+        }
+
+        sample.data = h->data;
+        const uint64_t payload = (uint64_t)(sample.end - sample.start) * sizeof(int16_t);
+        LoadingProgress::add((payload + 3ULL) & ~3ULL);
+    }
+
+    LoadingProgress::finish();
+    sf2FullyResident = true;
+    ESP_LOGI("SF2", "full SF2 resident: %u samples, %llu KB",
+             (unsigned)validSamples, (unsigned long long)(requiredBytes >> 10));
+    return true;
+}
+
 void Synth::programChange(uint8_t ch, uint8_t program) {
     if (ch >= 16) return;
 
@@ -615,9 +695,9 @@ void Synth::programChange(uint8_t ch, uint8_t program) {
     auto& all = parser.getSamples();
     auto needed = parser.getSamplesForPreset(state.getBank(), state.program);
 
-    ESP_LOGI("PC", "ch=%u bank=%u program=%u needed=%u totalSamples=%u",
-             ch, state.getBank(), state.program,
-             (uint32_t)needed.size(), (uint32_t)all.size());
+ //   ESP_LOGI("PC", "ch=%u bank=%u program=%u needed=%u totalSamples=%u",
+ //            ch, state.getBank(), state.program,
+ //            (uint32_t)needed.size(), (uint32_t)all.size());
 
     auto containsSample = [](const std::vector<SampleHeader*>& list,
                              const SampleHeader* sample) -> bool {
@@ -713,9 +793,9 @@ void Synth::programChange(uint8_t ch, uint8_t program) {
     }
 
     if (incrementalOk) {
-        ESP_LOGI("PC", "incremental OK: loaded=%u reused=%u",
-                 loaded, reused);
-        dump_mem_caps("after_prog_ch");
+    //    ESP_LOGI("PC", "incremental OK: loaded=%u reused=%u",
+    //             loaded, reused);
+    //    dump_mem_caps("after_prog_ch");
         if (ownLoadingProgress) LoadingProgress::finish();
         endAssetUpdate();
         return;
@@ -1234,6 +1314,7 @@ bool Synth::loadSf2File(const char* filename) {
     // First terminate every user of the current PCM while the old arena still
     // exists, then return the entire arena to PSRAM before parsing metadata.
     reset();
+    sf2FullyResident = false;
     samplePool.deinit();
     parser.clear();
 
@@ -1279,10 +1360,12 @@ bool Synth::loadSf2File(const char* filename) {
     }
     dump_mem_caps("after_pool_init");
 
+    const bool fullResident = tryLoadFullSf2();
+
     // GMReset will load Program 0 for all channels (drum bank on ch10).
     // Build a deduplicated byte total so the 16-bar meter advances according
     // to actual PCM volume rather than sample count.
-    {
+    if (!fullResident) {
         auto& allSamples = parser.getSamples();
         std::vector<uint8_t> seen(allSamples.size(), 0);
         uint64_t totalBytes = 0;
@@ -1300,7 +1383,7 @@ bool Synth::loadSf2File(const char* filename) {
     }
 
     GMReset();
-    LoadingProgress::finish();
+    if (!fullResident) LoadingProgress::finish();
 
     currentSf2Path = fullPath;
     endAssetUpdate();
@@ -1381,6 +1464,9 @@ bool Synth::saveSynthState(const char* path) {
     uint8_t fsTypeByte = static_cast<uint8_t>(getCurrentFsType());
     writeTLV(f, PARAM_SF2_FS_TYPE, &fsTypeByte, 1);
 
+    uint8_t sampleLoadModeByte = static_cast<uint8_t>(sampleLoadMode);
+    writeTLV(f, PARAM_SAMPLE_LOAD_MODE, &sampleLoadModeByte, 1);
+
 
     // Channels
     for (int ch = 0; ch < 16; ++ch) {
@@ -1443,6 +1529,14 @@ bool Synth::loadSynthState(const char* path) {
     if (auto it = map.find(PARAM_SF2_FS_TYPE); it != map.end() && it->second.len == 1)
         loadedFsType = static_cast<FileSystemType>(it->second.data[0]);
 
+    // This policy must be restored before loading the SF2 because it decides
+    // whether the complete sample set is preloaded into PSRAM.
+    if (auto it = map.find(PARAM_SAMPLE_LOAD_MODE); it != map.end() && it->second.len == 1) {
+        sampleLoadMode = (it->second.data[0] == static_cast<uint8_t>(SampleLoadMode::FULL_IF_FITS))
+            ? SampleLoadMode::FULL_IF_FITS
+            : SampleLoadMode::PRESET_ONLY;
+    }
+
     // Load the SF2 first. This parses metadata with the sample arena released,
     // then creates the arena and establishes a valid default working set.
     bool sf2Loaded = false;
@@ -1477,5 +1571,6 @@ bool Synth::loadSynthState(const char* path) {
 
     return true;
 }
+
 
 
