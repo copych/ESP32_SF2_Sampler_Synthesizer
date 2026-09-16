@@ -14,7 +14,6 @@
  *   - Optional SD card and/or LittleFS
  * 
  * Author: Evgeny Aslovskiy AKA Copych
- * Usb midi host functionality added by Vadims Maksimovs AKA Ledlaux
  * License: MIT
  * Repository: https://github.com/copych/ESP32-S3_SF2_Sampler_Synthesizer
  * 
@@ -23,7 +22,8 @@
  * ----------------------------------------------------------------------------
  */
 
-#pragma once
+#pragma once 
+
 
 // ===================== AUDIO ======================================================================================
 #define   DMA_BUFFER_NUM        2     // number of internal DMA buffers
@@ -31,15 +31,18 @@
 #define   CHANNEL_SAMPLE_BYTES  2     // can be 1, 2, 3 or 4 (2 and 4 only supported yet)
 #define   SAMPLE_RATE           44100
 
-// ===================== MIDI =======================================================================================
+// ===================== SAMPLE ASSET I/O / STORAGE ================================================================
+#define   SAMPLE_POOL_BLOCK_SIZE 4096u    // PSRAM allocation granularity; keep small to limit internal waste
+#define   SAMPLE_IO_CHUNK_SIZE   32768u   // SD read / DMA bounce-buffer size (64 sectors @ 512 B)
+
+// ===================== MIDI ==========================5=============================================================
 #define   USE_USB_MIDI_DEVICE   1     // definition: the synth appears as a USB MIDI Device "S3 SF2 Synth"
 #define   USE_MIDI_STANDARD     2     // definition: the synth receives MIDI messages via serial 31250 bps
 #define   USE_USB_HOST          3     // definition: the synth receives MIDI from USB MIDI keyboard via USB-OTG port
-#define   MIDI_IN_DEV           USE_USB_HOST // select the appropriate (one of the above) 
+#define   MIDI_IN_DEV            USE_USB_HOST         // select the appropriate (one of the above) 
 #define   NUM_MIDI_CHANNELS		16
 
 // ===================== SYNTHESIZER ================================================================================
-#define MAX_VOICES 19 // for now 20 is max for per-channel filtering + chorus + reverb
 #define MAX_VOICES_PER_NOTE 2
 #define PITCH_BEND_CENTER 0
 
@@ -56,41 +59,108 @@
 #define FILTER_MAX_Q 7.0f
 
 static const char* SF2_PATH = "/"; 
+
 #define DEFAULT_CONFIG_FILE "/default_config.bin"
-// ===================== MIDI PINS ==================================================================================
-#define MIDI_IN         15      // if USE_MIDI_STANDARD is selected as MIDI_IN, this pin receives MIDI messages
+ 
 
-// ===================== I2S PINS ===================================================================================
-#define I2S_BCLK_PIN    5       // I2S BIT CLOCK pin (BCL BCK CLK)
-#define I2S_DOUT_PIN    6       // MCU Data Out: connect to periph. DATA IN (DIN D DAT)
-#define I2S_WCLK_PIN    7       // I2S WORD CLOCK pin (WCK WCL LCK)
-#define I2S_DIN_PIN     -1      // MCU Data In: connect to periph. DATA OUT (DOUT D SD)
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV)
 
-// ===================== SD MMC PINS ================================================================================
-// ESP32S3 allows almost any GPIOs for any particular needs
-#define SDMMC_CMD 38
-#define SDMMC_CLK 39
-#define SDMMC_D0  10
-#define SDMMC_D1  11
-#define SDMMC_D2  12
-#define SDMMC_D3  13
+  // =====================  Synth  ============================
+  #define MAX_VOICES 19 // for now 20 is max for per-channel filtering + chorus + reverb
 
-// ===================== GUI SETTINGS ==========================================================================
-// #define ENABLE_GUI
+  // ===================== MIDI PINS ==================================================================================
+  #define MIDI_IN         4      // if USE_MIDI_STANDARD is selected as MIDI_IN, this pin receives MIDI messages
 
-#ifdef ENABLE_GUI
-  #define DISPLAY_CONTROLLER SH1106
-  // #define DISPLAY_CONTROLLER SSD1306
+  // ===================== I2S PINS ===================================================================================
+  #define I2S_BCLK_PIN    5       // I2S BIT CLOCK pin (BCL BCK CLK)
+  #define I2S_DOUT_PIN    6       // MCU Data Out: connect to periph. DATA IN (DIN D DAT)
+  #define I2S_WCLK_PIN    7       // I2S WORD CLOCK pin (WCK WCL LCK)
+  #define I2S_DIN_PIN     -1      // MCU Data In: connect to periph. DATA OUT (DOUT D SD)
 
-  #define ACTIVE_STATE  LOW   // LOW = switch connects to GND, HIGH = switch connects to 3V3
+  // ===================== SD MMC PINS ================================================================================
+  // ESP32S3 allows almost any GPIOs for any particular needs
+  #define SDMMC_CMD 38
+  #define SDMMC_CLK 39
+  #define SDMMC_D0  10
+  #define SDMMC_D1  11
+  #define SDMMC_D2  12
+  #define SDMMC_D3  13
 
   #define BTN0_PIN 	14
   #define ENC0_A_PIN 	15
   #define ENC0_B_PIN 	16
 
-  #define DISPLAY_SDA 8 // SDA GPIO
-  #define DISPLAY_SCL 9 // SCL GPIO
+// display signal wires
+	// the two used both in SPI and I2C
+   #define DISPLAY_SDA 8 // SDA (MOSI) GPIO
+   #define DISPLAY_SCL 9 // SCL (SCK) GPIO
+  
+	// SPI specific pins
+//  #define DISPLAY_CS  4 // CS GPIO 
+//  #define DISPLAY_DC  5 // DC GPIO
+//  #define DISPLAY_RES 3 // RES (RST, RESET) GPIO , this pin is not mandatory, but it's better to have one defined
 
+
+#elif defined(CONFIG_IDF_TARGET_ESP32P4) || defined(ARDUINO_ESP32P4_DEV)
+
+  // =====================  Synth  ============================
+  #define MAX_VOICES 25 // for now 25 is max for per-channel filtering + chorus + reverb
+
+  #define MIDI_IN         15      // if USE_MIDI_STANDARD is selected as MIDI_IN, this pin receives MIDI messages
+
+  // ===================== I2S PINS ===================================================================================
+  #define I2S_BCLK_PIN    48       // I2S BIT CLOCK pin (BCL BCK CLK)
+  #define I2S_DOUT_PIN    47       // MCU Data Out: connect to periph. DATA IN (DIN D DAT)
+  #define I2S_WCLK_PIN    46       // I2S WORD CLOCK pin (WCK WCL LCK)
+  #define I2S_DIN_PIN     -1      // MCU Data In: connect to periph. DATA OUT (DOUT D SD)
+  
+  // ===================== SD MMC PINS ================================================================================
+  // ESP32P4 SPI slot 1 is locked to hardware pins
+  #define SDMMC_CMD 44
+  #define SDMMC_CLK 43
+  #define SDMMC_D0  39
+  #define SDMMC_D1  40
+  #define SDMMC_D2  41
+  #define SDMMC_D3  42
+
+  #define BTN0_PIN 	10
+
+  #define ENC0_A_PIN 	22
+  #define ENC0_B_PIN 	23
+
+// display signal wires
+	// the two used both in SPI and I2C
+   #define DISPLAY_SDA 19 // SDA (MOSI) GPIO
+   #define DISPLAY_SCL 18 // SCL (SCK) GPIO
+  
+	// SPI specific pins
+  #define DISPLAY_CS  4 // CS GPIO 
+  #define DISPLAY_DC  5 // DC GPIO
+  #define DISPLAY_RES 3 // RES (RST, RESET) GPIO , this pin is not mandatory, but it's better to have one defined
+
+
+#endif
+ 
+
+
+// ===================== GUI SETTINGS ==========================================================================
+#define ENABLE_GUI
+
+#ifdef ENABLE_GUI
+	// choose the right one according to your hardware setup
+  // #define DISPLAY_INTERFACE_HW_SPI // 7 pins
+  // #define DISPLAY_INTERFACE_SW_SPI // 7 pins
+   #define DISPLAY_INTERFACE_HW_I2C // 4 pins
+  // #define DISPLAY_INTERFACE_SW_I2C // 4 pins
+
+  #define DISPLAY_CONTROLLER SH1106
+  // #define DISPLAY_CONTROLLER SSD1306
+
+  #define ACTIVE_STATE  LOW   // LOW = switch connects to GND, HIGH = switch connects to 3V3
+
+
+
+// display dimensions and layout
   #define DISPLAY_W 128
   #define DISPLAY_H 64
   #define DISPLAY_ROTATE 0 // can be 0, 90, 180 or 270
@@ -110,7 +180,12 @@ static const char* SF2_PATH = "/";
 
 
 
+
+
+
 // !!!!!!!!!!!!!=======  DO NOT CHANGE  =======!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+#ifdef ENABLE_GUI
 // U8G2 CONSTRUCTOR MACROS
 #if (DISPLAY_ROTATE == 180)
   #define U8_ROTATE U8G2_R2
@@ -122,10 +197,38 @@ static const char* SF2_PATH = "/";
   #define U8_ROTATE U8G2_R0
 #endif
 
+
+// INTERFACE SELECTION
+
+#if defined(DISPLAY_INTERFACE_HW_I2C)
+  #define DISPLAY_INTERFACE HW_I2C
+  #define U8_INIT_ARGS U8_ROTATE, U8X8_PIN_NONE, DISPLAY_SCL, DISPLAY_SDA
+
+#elif defined(DISPLAY_INTERFACE_HW_SPI)
+  #define DISPLAY_INTERFACE 4W_HW_SPI
+  #define U8_INIT_ARGS U8_ROTATE, DISPLAY_CS, DISPLAY_DC, DISPLAY_RES
+  
+#elif defined(DISPLAY_INTERFACE_SW_I2C)
+  #define DISPLAY_INTERFACE SW_I2C
+  #define U8_INIT_ARGS U8_ROTATE, DISPLAY_SCL, DISPLAY_SDA, U8X8_PIN_NONE
+
+#elif defined(DISPLAY_INTERFACE_SW_SPI)
+  #define DISPLAY_INTERFACE 4W_SW_SPI
+  #define U8_INIT_ARGS U8_ROTATE, DISPLAY_SCL, DISPLAY_SDA, DISPLAY_CS, DISPLAY_DC, DISPLAY_RES
+#else
+  #error "Display interface not defined"
+#endif
+
+
 #define W_H_DIV X
-#define _U8_CONCAT(ctrl, w, div, h) U8G2_ ## ctrl ## _ ## w ## div ## h ## _NONAME_F_HW_I2C
-#define U8_CONCAT(ctrl, w, div, h) _U8_CONCAT(ctrl, w, div, h)
-#define U8_OBJECT U8_CONCAT(DISPLAY_CONTROLLER, DISPLAY_W, W_H_DIV, DISPLAY_H)
+
+#define _U8_CONCAT(ctrl, w, div, h, ifc) U8G2_ ## ctrl ## _ ## w ## div ## h ## _NONAME_F_ ## ifc
+#define U8_CONCAT(ctrl, w, div, h, ifc) _U8_CONCAT(ctrl, w, div, h, ifc)
+#define U8_OBJECT U8_CONCAT(DISPLAY_CONTROLLER, DISPLAY_W, W_H_DIV, DISPLAY_H, DISPLAY_INTERFACE)
+
+
+#endif
+
 
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
@@ -135,4 +238,3 @@ static const char* SF2_PATH = "/";
 #else
   #define SIG_INPUT_MODE    INPUT_PULLDOWN  
 #endif
-

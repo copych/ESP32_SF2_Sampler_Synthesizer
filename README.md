@@ -1,36 +1,27 @@
-# ESP32-S3 SoundFont (SF2) Sampler Synthesizer (Fork)
+# The new features
+- **Savvy samples loading**: loads only the samples for the instruments requested by Program Change MIDI events
+- **Loading meter**: the gauge indicates SF2 loading progress, so you can be sure that it's working.
+- **Custom partitions**: the project now includes partitions.csv with the optimal layout for the common 16MB flash boards. If you don't have one, you'd better delete this file from your clonned project
 
-An SF2 based wavetable synthesizer designed specifically for the ESP32-S3 microcontroller. This project leverages the enhanced memory capabilities of the ESP32-S3 (with PSRAM) to efficiently load and play SoundFont samples, providing a compact, affordable, and powerful sampler solution.
+# ESP32 SoundFont (SF2) Sampler Synthesizer
+
+An SF2 (SoundFont 2) based wavetable synth designed specifically for the ESP32-S3 / ESP32-P4 microcontrollers. This project leverages the enhanced memory capabilities of the PSRAM equipped MCUs to efficiently load and play SoundFont samples, providing a compact and powerful sampler solution. It's cheap and simple, yet powerful.
 
 ---
 
-###  About This Fork
-This fork builds upon the original project by **Evgeny Aslovskiy (Copych)**, adding **USB MIDI host functionality** that allows the ESP32-S3 to interface directly with USB MIDI devices.
+##  About This Fork
 
+This fork builds upon the original project by **Evgeny Aslovskiy (Copych)**, adding **USB MIDI host functionality** that allows the ESP32-S3 to interface directly with USB MIDI devices. MIDI input mode can be changed in config file. ESP32-P4 is not tested.
 
-###  Key Changes
-- Added USB MIDI Host Support using [Enudenki’s ESP32 USB Host MIDI Library](https://github.com/enudenki/esp32-usb-host-midi-library)  `/src/usbhost`
-- Logs and GUI disabled for streamlined performance  
-- To change MIDI input mode or re-enable the GUI, edit `config.h`
-
-
-###  Enabling USB MIDI Host on ESP32-S3
-1. **Hardware setup** – Solder the **USB-OTG host pad** on your ESP32-S3 board.  
+##  Enabling USB MIDI Host on ESP32-S3
+1. **Hardware setup** – Solder the **USB-OTG host pad** on your ESP32-S3 board.
+   
 2. **IDE configuration** – In the **Arduino IDE** select 
-   `Tools → USB Mode → USB-OTG (TinyUSB)`  
-
-
-
-###  License & Credits
-- **License:** MIT (same as upstream)  
-- **Upstream repository:** [Copych / ESP32-S3_SF2_Sampler_Synthesizer](https://github.com/copych/ESP32-S3_SF2_Sampler_Synthesizer)  
-  (Refer there for full project history, documentation, and original features.)
-
----
+   `Tools → USB Mode: “USB-OTG (TinyUSB)”   
 
 ## Overview
 
-The ESP32-S3 SF2 Sampler is a sampler firmware that runs exclusively on the ESP32-S3 variant due to its improved PSRAM and memory management compared to the original ESP32. It supports external DACs like the PCM5102 for high-quality audio output and uses the built-in USB hardware of the ESP32-S3 to function as a USB MIDI device. By default, the BOOT button of the DevBoard is configured to cycle through SF2 files on the current filesystem. Long press on BOOT button will switch between Flash LittleFS and SD filesystems.
+The ESP32 SF2 Sampler is a sampler firmware that runs on the ESP32S3 / ESP32P4 variants due to their improved PSRAM and memory management compared to the original ESP32. It supports external DACs like the PCM5102 for high-quality audio output and uses the built-in USB hardware of the MCUs to function as a USB MIDI device. By default, the BOOT button of the DevBoard is configured to cycle through SF2 files on the current filesystem. Long press on BOOT button will switch between Flash LittleFS and SD filesystems.
 
 <img src="./media/prototype.jpg?raw=true">
 
@@ -38,22 +29,22 @@ The ESP32-S3 SF2 Sampler is a sampler firmware that runs exclusively on the ESP3
 
 ## Features
 
-- **SF2 playback**: Load SoundFont2 banks up to PSRAM size.
-- **Filesystem**: Runtime switch between LittleFS and fast 4-bit SD_MMC.
+- **SF2 playback**: Load SoundFont2 banks of MORE than PSRAM size.
+- **Filesystem**: Runtime switch between LittleFS and SD_MMC (fast 4-bit bus supported).
 - **USB MIDI**: Plug-and-play MIDI device support.
 - **Per-voice filters**: Optional biquad LPF (configurable in `config.h`).
 - **Per-channel filters**: Optional CC#74/71-controlled LPF/resonance.
 - **Effects**: Reverb (CC#91), Chorus (CC#93), Delay (CC#95).
 - **MIDI control**: GM, partially GS/XG-compatible CCs, PC, RPNs, drums on ch.10, GM reset.
 - **External DAC**: Works with PCM5102 and similar I2S DACs.
-- **ESP32-S3 optimized**: Dual-core, PSRAM, minimal wiring.
+- **ESP32-S3 / P4 optimized**: Dual-core, PSRAM, minimal wiring.
 - **Optional OLED GUI**: Use a rotary encoder and a button to navigate. 
 
 ---
 
 ## Hardware Requirements
 
-- **ESP32-S3 microcontroller** with PSRAM (OPI PSRAM recommended)
+- **ESP32-S3 or ESP32-P4 microcontroller** with PSRAM (OPI PSRAM recommended)
 - **External DAC** (e.g., PCM5102)
 - USB connection for MIDI and power
 
@@ -75,6 +66,8 @@ These pins can be changed in config.h if needed
 
 ## SD CARD Pin Connections:
 
+ESP32-S3: these pins can be changed in config.h if needed
+
 | Signal | GPIO Pin |
 |--------|----------|
 | CMD     | GPIO38  |
@@ -86,7 +79,21 @@ These pins can be changed in config.h if needed
 | VCC    | 3V3  |
 | GND    | GND  |
 
-These pins can be changed in config.h if needed
+
+ESP32-P4: fixed pins, external 10k pull-up resistors are required
+
+| Signal | GPIO Pin |
+|--------|----------|
+| CMD     | GPIO44  |
+| CLK     | GPIO43  |
+| D0     | GPIO39  |
+| D1     | GPIO40  |
+| D2     | GPIO41  |
+| D3     | GPIO42  |
+| VCC    | 3V3  |
+| GND    | GND  |
+
+Note that ESP32P4's SD_MMC SLOT0 uses predefined GPIOs and won't let you change them. If you realy want another set of pins, modify config.h and sdmmc.ino `begin()` to use SLOT1 
 
 ---
 ## GUI:
@@ -102,8 +109,8 @@ GUI requires U8g2 library.
 | display SDA | 8    |
 | display SCL | 9    |
 
-
 These pins can be changed in config.h if needed
+
 
 ---
 ## Software Setup
@@ -123,16 +130,16 @@ To build and upload this project using Arduino IDE, configure the following sett
 
 ## Usage
 
-1. Connect your ESP32-S3 board with PSRAM and external DAC according to the pinout above.
+1. Connect your MCU board with PSRAM and external DAC according to the pinout above.
 2. Load your preferred SF2 SoundFont files onto the device (refer to project documentation for details on loading SF2 files).
-3. Connect the ESP32-S3 via USB to your computer or MIDI host.
+3. Connect the ESP32 via USB to your computer or MIDI host.
 4. The device will enumerate as a USB MIDI device, allowing you to play samples via MIDI input.
 
 ---
 
 ## Notes
 
-- This project is **only compatible with the ESP32-S3** due to memory and PSRAM requirements.
+- This project is **only compatible with the ESP32-S3 / ESP32-P4** due to memory and PSRAM requirements.
 - Using a core debug level above **Info** may interfere with USB MIDI functionality.
 - Ensure your external DAC is properly powered and connected for optimal audio quality.
 
@@ -147,6 +154,8 @@ Contributions, issues, and feature requests are welcome! Feel free to open a pul
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+USB midi host library by [Enudenki](https://github.com/enudenki/esp32-usb-host-midi-library) is licensed under MIT License. 
 
 ---
 

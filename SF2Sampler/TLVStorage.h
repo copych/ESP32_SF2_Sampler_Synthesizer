@@ -2,6 +2,7 @@
 
 #define PARAM_SF2_FILENAME      0x0001
 #define PARAM_SF2_FS_TYPE       0x0002  // 1 byte (FileSystemType enum)
+#define PARAM_SAMPLE_LOAD_MODE  0x0003  // 1 byte (SampleLoadMode enum)
 
 // Effects
 #define PARAM_REVERB_TIME       0x0101
@@ -39,3 +40,4 @@ static std::map<uint16_t, TLV> readTLV(File& f) {
     }
     return map;
 }
+

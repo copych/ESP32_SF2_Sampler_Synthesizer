@@ -30,7 +30,7 @@
 #include "SF2Parser.h"
 #include "adsr.h"
 #include "biquad2.h"
-
+#include "SamplePool.h"
 
 enum LoopType {
     NO_LOOP = 0,
@@ -39,6 +39,9 @@ enum LoopType {
     SUSTAIN_LOOP = 3,
     PING_PONG_LOOP = 4 // never used
 };
+
+// Returns and clears BAD FETCH events accumulated by Core0. Call from Core1 only.
+uint32_t takeVoiceBadFetchCount();
 
 struct DRAM_ATTR Voice {
     float phase = 0.0f; 
@@ -106,14 +109,37 @@ struct DRAM_ATTR Voice {
     uint32_t  loopStart = 0;
     uint32_t  loopEnd = 0;
     uint32_t  loopLength = 0;
-    uint32_t  active = false; 
+    uint32_t  active = false;
+
+    // Cross-core voice ownership. Core0 holds this for the complete per-voice
+    // audio block; Core1 takes it for lifetime/restart mutations. This keeps
+    // start/stop/steal operations out of nextSample() without adding a
+    // per-sample synchronization branch.
+    volatile uint32_t stateLock = 0;
+
+    inline bool __attribute__((always_inline)) tryLockState() {
+        uint32_t expected = 0;
+        return __atomic_compare_exchange_n(&stateLock, &expected, 1, false,
+                                           __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+    }
+
+    inline void lockState() {
+        while (!tryLockState()) taskYIELD();
+    }
+
+    inline void __attribute__((always_inline)) unlockState() {
+        __atomic_store_n(&stateLock, 0, __ATOMIC_RELEASE);
+    }
+
     uint32_t  forward = true; // for ping-pong
-    LoopType  loopType = NO_LOOP;
-    SampleHeader* sample = nullptr;
+    LoopType  loopType = NO_LOOP; 
     Zone zone = {};
   //  ChannelState* ch = nullptr; 
 
-    int16_t* data;
+    SampleHandle* sampleHandle = nullptr;
+    uint32_t sampleID = 0;
+
+    const int16_t* data = nullptr;
 
     Adsr ampEnv;
 
@@ -128,6 +154,7 @@ struct DRAM_ATTR Voice {
     void stop();
     void kill();
     void die();
+    void releaseSample();
     bool isRunning() const;
     float nextSample();
     void renderBlock(float* block);
@@ -162,4 +189,5 @@ struct DRAM_ATTR Voice {
     void printState();
     bool isLegato = false;
 };
+
 

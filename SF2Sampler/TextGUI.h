@@ -56,11 +56,12 @@ public:
     static MenuItem Action(const String&, MenuAction);
     static MenuItem Value(const String&, ValueGetter, ValueSetter, int, int, int);
     static MenuItem Toggle(const String&, ValueGetter, ValueSetter);
-    static MenuItem Submenu(const String&, MenuGenerator);
+    static MenuItem Submenu(const String&, MenuGenerator, bool showBusy = false);
     static MenuItem Custom(const String&, std::function<void(TextGUI&, U8G2&, int, int)>, MenuAction = nullptr);
 
     String title;
     MenuItemType type;
+    bool showBusy = false;
 
     union {
         struct {
@@ -99,6 +100,11 @@ public:
     void draw();
     void fullUpdate();
     void busyMessage(const String& str);
+    void beginBusy(const String& str = "Waiting...");
+    void beginLoading(const String& str = "Loading...");
+    void endLoading();
+    void serviceLoadingProgress(uint8_t progress);
+    void endBusy();
 
     // Navigation methods
     void enterSubmenu(std::vector<MenuItem>&& items, const String& title = "");
@@ -120,12 +126,18 @@ private:
     SynthState& state;
     MuxEncoder encoder;
     MuxButton button;
+
     U8_OBJECT display;
+    
     bool editingValue = false;
     // Menu state
     std::vector<MenuContext> menuStack;
     int cursorPos = 0;
     bool needsRedraw = true;
+    bool displayUpdateInProgress = false;
+    int updateTileX = 0;
+    int updateTileY = 0;
+    bool busy = false;
     
 
     // Initial menu setup
@@ -136,6 +148,14 @@ private:
     void onButtonEvent(MuxButton::btnEvents evt);
     
     // Rendering
+    void renderLoadingMeter(uint8_t progress);
+    static void loadingPumpThunk(void* ctx, uint8_t progress);
+    uint8_t lastLoadingProgress = 0xFF;
+    uint32_t lastLoadingRevision = 0;
+    uint8_t lastActivityLevels[16] = {0};
+    bool activityLevelsValid = false;
+    String loadingMessage;
+
     void renderDisplay();
     void renderMenu();
     void renderStatusBar();
