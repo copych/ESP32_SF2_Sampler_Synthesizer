@@ -9,6 +9,16 @@ An SF2 (SoundFont 2) based wavetable synth designed specifically for the ESP32-S
 
 ---
 
+##  About This Fork
+
+This fork builds upon the original project by **Evgeny Aslovskiy (Copych)**, adding **USB MIDI host functionality** that allows the ESP32-S3 to interface directly with USB MIDI devices. MIDI input mode can be changed in config file. 
+
+##  Enabling USB MIDI Host on ESP32-S3
+1. **Hardware setup** – Solder the **USB-OTG host pad** on your ESP32-S3 board.
+   
+2. **IDE configuration** – In the **Arduino IDE** select 
+   `Tools → USB Mode: “USB-OTG (TinyUSB)”   
+
 ## Overview
 
 The ESP32 SF2 Sampler is a sampler firmware that runs on the ESP32S3 / ESP32P4 variants due to their improved PSRAM and memory management compared to the original ESP32. It supports external DACs like the PCM5102 for high-quality audio output and uses the built-in USB hardware of the MCUs to function as a USB MIDI device. By default, the BOOT button of the DevBoard is configured to cycle through SF2 files on the current filesystem. Long press on BOOT button will switch between Flash LittleFS and SD filesystems.
@@ -144,6 +154,8 @@ Contributions, issues, and feature requests are welcome! Feel free to open a pul
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+USB midi host library by [Enudenki](https://github.com/enudenki/esp32-usb-host-midi-library) is licensed under MIT License. 
 
 ---
 
