@@ -25,10 +25,40 @@
 
 #include "voice.h"
 #include "misc.h"
-
 #include <esp_dsp.h>
 
+#include "SamplePool.h"
+extern SamplePool samplePool;
 static const char* TAG = "Voice";
+
+// -----------------------------------------------------------------------------
+// Temporary start-of-sample diagnostics.
+// Set VOICE_START_DIAG_NOTE to a MIDI note (0..127) to reduce log volume.
+// -1 logs every started note.  All logging is from Core1/startNew path, never
+// from nextSample()/Core0.
+// -----------------------------------------------------------------------------
+#ifndef VOICE_START_DIAG
+#define VOICE_START_DIAG 1
+#endif
+#ifndef VOICE_START_DIAG_NOTE
+#define VOICE_START_DIAG_NOTE -1
+#endif
+
+static inline bool voiceStartDiagEnabled(uint8_t note) {
+#if VOICE_START_DIAG
+    return VOICE_START_DIAG_NOTE < 0 || note == VOICE_START_DIAG_NOTE;
+#else
+    return false;
+#endif
+}
+
+// Audio-thread diagnostics: increment only on an already exceptional path.
+// Reporting is performed from Core1; never log from nextSample().
+static volatile uint32_t gVoiceBadFetchCount = 0;
+
+uint32_t takeVoiceBadFetchCount() {
+    return __atomic_exchange_n(&gVoiceBadFetchCount, 0, __ATOMIC_RELAXED);
+}
 
 inline float velocityToGain(uint32_t velocity) {
     //    return velocity * velocity * DIV_127 * DIV_127; // square velocity 
@@ -38,10 +68,64 @@ inline float velocityToGain(uint32_t velocity) {
 
 
 
+// Static approximation of the SF2 modulation envelope.
+// Integrate a piecewise-linear D/A/H/D/S envelope over the first 250 ms.
+// Called only during voice preparation; no runtime envelope state/cost.
+static float approximateModEnv250ms(const Zone& z) {
+    constexpr float W = 0.250f;
+    float area = 0.0f;
+    float t = 0.0f;
+
+    // Delay: E = 0.
+    float dt = fminf(z.modDelayTime, W);
+    t += dt;
+    if (t >= W) return 0.0f;
+
+    // Attack: linear 0 -> 1. Handle a window ending inside attack.
+    if (z.modAttackTime > 0.0f) {
+        dt = fminf(z.modAttackTime, W - t);
+        const float e1 = dt / z.modAttackTime;
+        area += dt * 0.5f * e1;
+        t += dt;
+        if (t >= W) return area / W;
+        if (dt < z.modAttackTime) return area / W;
+    }
+
+    // Hold: E = 1.
+    dt = fminf(z.modHoldTime, W - t);
+    area += dt;
+    t += dt;
+    if (t >= W) return area / W;
+
+    // Decay: linear 1 -> sustain. Handle a window ending inside decay.
+    if (z.modDecayTime > 0.0f) {
+        dt = fminf(z.modDecayTime, W - t);
+        const float k = dt / z.modDecayTime;
+        const float e1 = 1.0f + (z.modSustainLevel - 1.0f) * k;
+        area += dt * 0.5f * (1.0f + e1);
+        t += dt;
+        if (t >= W) return area / W;
+    }
+
+    // Sustain for the remainder of the 250 ms window.
+    if (t < W) area += (W - t) * z.modSustainLevel;
+    return area / W;
+}
+
 void Voice::prepareStart(uint8_t ch, uint8_t note_, uint8_t vel, const Zone& z, ChannelState* chan) {
     zone = z;
-    sample = zone.sample;
-    data = reinterpret_cast<int16_t*>(__builtin_assume_aligned(sample->data, 4));
+
+    sampleID = zone.sampleID; 
+    // expect sampleHandle already set before calling prepareStart
+    if (!sampleHandle) {
+        active = false;
+        return;
+    }
+
+    data = (const int16_t*)__builtin_assume_aligned(sampleHandle->data, 4);
+  //  ESP_LOGI("VOICE", "PREP ch=%u note=%u sid=%u handle=%p data=%p len=%u rate=%u",
+  //           ch, note_, zone.sampleID, sampleHandle, sampleHandle->data,
+  //           sampleHandle->length, sampleHandle->sampleRate);
 
     int startNote = chan->portaCurrentNote;
 
@@ -49,7 +133,7 @@ void Voice::prepareStart(uint8_t ch, uint8_t note_, uint8_t vel, const Zone& z, 
     velocity = vel;
     channel = ch;
     forward = true;
-    phase = 1.0f; // interpolation uses -1, so first will be 0 and branchless
+    phase = 1.0f;
     noteHeld = true;
     samplesRun = lastSamplesRun = 0;
     exclusiveClass = zone.exclusiveClass;
@@ -62,19 +146,31 @@ void Voice::prepareStart(uint8_t ch, uint8_t note_, uint8_t vel, const Zone& z, 
     modSustain = &chan->sustainPedal;
     modPortaTime = &chan->portaTime;
     modPortamento = &chan->portamento;
- 
+
     chFilter.setCoeffs(&chan->filterCoeffs);
     chFilter.resetState();
 
     velocityVolume = velocityToGain(velocity) * zone.attenuation;
 
-    float modEnvStaticTune = (zone.modAttackTime < 1.0f) ?
-        (1.0f - zone.modSustainLevel) * zone.modEnvToPitch * 0.01f : 0.0f;
+    int rootKey = (zone.rootKey >= 0) ? zone.rootKey : sampleHandle->rootKey;
 
-    int rootKey = (zone.rootKey >= 0) ? zone.rootKey : sample->originalPitch;
-    float semi = float(note_ - rootKey) + (sample->pitchCorrection * 0.01f) + zone.coarseTune + zone.fineTune + chan->tuningSemitones;
-    float noteRatio = exp2f((modEnvStaticTune + semi) * DIV_12);
-    float baseStep = float(sample->sampleRate) * DIV_SAMPLE_RATE;
+    // Static SF2 pitch. ScaleTuning is cents/key (100 = equal-tempered
+    // semitone spacing). shdr pitchCorrection is a signed cent correction
+    // applied to the sample playback rate. ModEnvToPitch is represented by
+    // the analytically averaged first 250 ms of the modulation envelope.
+    const float staticModEnv = approximateModEnv250ms(zone);
+    const float keySemi = float(note_ - rootKey) * (zone.scaleTuning * 0.01f);
+    const float sampleCorrectionSemi = float(sampleHandle->pitchCorrection) * 0.01f;
+    const float modEnvPitchSemi = staticModEnv * zone.modEnvToPitch * 0.01f;
+    const float semi = keySemi
+                     + zone.coarseTune
+                     + zone.fineTune
+                     + sampleCorrectionSemi
+                     + modEnvPitchSemi
+                     + chan->tuningSemitones;
+
+    float noteRatio = exp2f(semi * DIV_12);
+    float baseStep = float(sampleHandle->sampleRate) * DIV_SAMPLE_RATE;
     basePhaseIncrement = baseStep * noteRatio;
 
     vibLfoPhase = 0.0f;
@@ -112,53 +208,75 @@ void Voice::prepareStart(uint8_t ch, uint8_t note_, uint8_t vel, const Zone& z, 
     ampEnv.setReleaseTime(zone.releaseTime * chan->releaseModifier);
 
     int32_t loopStartOffset = zone.loopStartOffset + (zone.loopStartCoarseOffset << 15);
-    int32_t loopEndOffset = zone.loopEndOffset + (zone.loopEndCoarseOffset << 15);
-    length = sample->end - sample->start;
-    loopStart = sample->startLoop + loopStartOffset - sample->start;
-    loopEnd = sample->endLoop + loopEndOffset - sample->start;
+    int32_t loopEndOffset   = zone.loopEndOffset   + (zone.loopEndCoarseOffset << 15);
+
+    length    = sampleHandle->length;
+    // phase is intentionally 1-based in nextSample(): phase == 1.0f maps
+    // to data[0] because interpolation reads data[idx - 1] / data[idx].
+    // SF2/SamplePool loop points are 0-based, so convert them once here.
+    loopStart = sampleHandle->loopStart + loopStartOffset + 1;
+    loopEnd   = sampleHandle->loopEnd   + loopEndOffset   + 1;
     loopLength = loopEnd - loopStart;
+
     loopType = static_cast<LoopType>(zone.sampleModes & 0x0003);
-    if (loopType == UNUSED || loopStart < 0 || loopEnd > length || loopLength <= 0) {
+    if (loopType == UNUSED || loopStart >= loopEnd || loopEnd > length) {
         loopType = NO_LOOP;
     }
 
 #ifdef ENABLE_IN_VOICE_FILTERS
-    filterCutoff = fclamp(zone.filterFc, 10.0f, 20000.0f);
+    // ModEnvToFilterFc is in absolute cents relative to InitialFilterFc.
+    // Use the same 250 ms static envelope approximation as pitch.
+    const float modFilterRatio = exp2f((staticModEnv * zone.modEnvToFilterFc) / 1200.0f);
+    filterCutoff = fclamp(zone.filterFc * modFilterRatio, 10.0f, 20000.0f);
     filterResonance = (zone.filterQ <= 0.0f) ? 0.707f : 1.0f / powf(10.0f, zone.filterQ / 20.0f);
     filter.resetState();
     filter.setFreqAndQ(filterCutoff, filterResonance);
 #endif
-
-    ESP_LOGD(TAG, "ch=%d note=%d atk=%.5f hld=%.5f dcy=%.5f sus=%.3f rel=%.5f loopStart=%u loopEnd=%u loopType=%d",
-        channel, note, zone.attackTime, zone.holdTime, zone.decayTime, zone.sustainLevel, zone.releaseTime,
-        static_cast<uint32_t>(loopStart), static_cast<uint32_t>(loopEnd), loopType);
-
-    ESP_LOGD(TAG, "ch=%d reverb=%.5f chorus=%.5f delay=%.5f", channel, reverbAmount, chorusAmount, ch->delaySend);
-
-    ESP_LOGD(TAG, "modToPitch=%.3f modEnvSustain=%.5f coarseTune=%.3f fineTune=%.3f", zone.modEnvToPitch, zone.modSustainLevel, zone.coarseTune, zone.fineTune);
-
 }
 
 void Voice::startNew(uint8_t ch, uint8_t note_, uint8_t vel, const Zone& z, ChannelState* chan) {
     prepareStart(ch, note_, vel, z, chan);
+    if (!sampleHandle || !data) {
+        ESP_LOGE("VOICE", "START ABORT ch=%u note=%u sid=%u handle=%p data=%p",
+                 ch, note_, z.sampleID, sampleHandle, data);
+        active = false;
+        return;
+    }
     ampEnv.retrigger(Adsr::END_NOW);
     active = true;
+ //   ESP_LOGI("VOICE", "START OK ch=%u note=%u sid=%u phase=%.3f inc=%.6f len=%u loop=%u [%u..%u]",
+ //            ch, note_, z.sampleID, phase, effectivePhaseIncrement, length,
+ //            (unsigned)loopType, (unsigned)loopStart, (unsigned)loopEnd);
 }
 
 
-void Voice::updatePitchOnly(uint8_t newNote, ChannelState* chan) {    
-    int rootKey = (zone.rootKey >= 0) ? zone.rootKey : sample->originalPitch;
-    float semi = float(newNote - rootKey) + (sample->pitchCorrection * 0.01f) + zone.coarseTune + zone.fineTune;
-    float noteRatio = exp2f(semi * DIV_12);
-    basePhaseIncrement = float(sample->sampleRate) * DIV_SAMPLE_RATE * noteRatio;
+void Voice::updatePitchOnly(uint8_t newNote, ChannelState* chan) {
+    if (!sampleHandle) return;
 
-    portamentoActive = modPortamento && *modPortamento; 
+    int rootKey = (zone.rootKey >= 0) ? zone.rootKey : sampleHandle->rootKey;
+
+    const float staticModEnv = approximateModEnv250ms(zone);
+    const float keySemi = float(newNote - rootKey) * (zone.scaleTuning * 0.01f);
+    const float sampleCorrectionSemi = float(sampleHandle->pitchCorrection) * 0.01f;
+    const float modEnvPitchSemi = staticModEnv * zone.modEnvToPitch * 0.01f;
+    const float semi = keySemi
+                     + zone.coarseTune
+                     + zone.fineTune
+                     + sampleCorrectionSemi
+                     + modEnvPitchSemi
+                     + chan->tuningSemitones;
+    float noteRatio = exp2f(semi * DIV_12);
+
+    basePhaseIncrement = float(sampleHandle->sampleRate) * DIV_SAMPLE_RATE * noteRatio;
+
+    portamentoActive = modPortamento && *modPortamento;
+
     if (portamentoActive) {
-        float noteDiff = float(newNote - chan->portaCurrentNote);
+        float noteDiff = float(newNote - chan->portaCurrentNote) * (zone.scaleTuning * 0.01f);
         float freqRatio = exp2f(noteDiff * DIV_12);
         float timeSec = 0.01f + (*modPortaTime) * 0.5f;
         float totalSamples = timeSec * SAMPLE_RATE;
-       // currentPhaseIncrement = basePhaseIncrement / freqRatio;
+
         portamentoFactor = 1.0f / freqRatio;
         portamentoLogDelta = exp2f(log2f(freqRatio) / totalSamples);
     } else {
@@ -168,9 +286,7 @@ void Voice::updatePitchOnly(uint8_t newNote, ChannelState* chan) {
     }
 
     note = newNote;
-    
     updatePitch();
-    ESP_LOGD(TAG, "Pitch recalc v_id %d portaFactor %.5f", id, portamentoFactor);
 }
 
 
@@ -182,7 +298,15 @@ void Voice::stop() {
     }
 }
 
+void Voice::releaseSample() {
+    if (!sampleHandle) return;
+    samplePool.release(sampleID);
+    sampleHandle = nullptr;
+    data = nullptr;
+}
+
 void Voice::kill() {
+    releaseSample();
     ampEnv.end(Adsr::END_NOW);
     noteHeld = false;
     active = false;
@@ -198,7 +322,7 @@ bool Voice::isRunning() const {
 }
 
 float __attribute__((hot,always_inline)) IRAM_ATTR Voice::nextSample() {
-    if (!sample) {
+    if (!sampleHandle) {
         active = false;
         return 0.0f;
     }
@@ -212,6 +336,19 @@ float __attribute__((hot,always_inline)) IRAM_ATTR Voice::nextSample() {
     uint32_t idx = (uint32_t)phase;
     float frac = phase - (float)idx;
 
+
+if (__builtin_expect(
+        !data ||
+        idx == 0 ||
+        idx >= (uint32_t)length,
+        0)) {
+    // Never format/log from Core0. Count the fault and let Core1 report it.
+    __atomic_fetch_add(&gVoiceBadFetchCount, 1, __ATOMIC_RELAXED);
+    active = false;
+    return 0.0f;
+}
+
+
     // float s0 = data[(idx > 0) ? (idx - 1) : 0];
     // phase[0] = 1.0, so never <= 0, cons: we never get clean 1st sample, pros: it's branchless
     float s0 = data[idx - 1];
@@ -223,7 +360,7 @@ float __attribute__((hot,always_inline)) IRAM_ATTR Voice::nextSample() {
 
     // Envelope process
     float env = ampEnv.process();
-    float val = smp * velocityVolume * env * (*modVolume) * (*modExpression);
+    float val = smp * env;
 
 #ifdef ENABLE_IN_VOICE_FILTERS
     val = filter.process(val);
@@ -249,6 +386,7 @@ float __attribute__((hot,always_inline)) IRAM_ATTR Voice::nextSample() {
             } else {
               loopType = NO_LOOP; // switch to a simplier route
               if (phase >= length) {
+                  releaseSample();
                   active = false;
                   return 0.0f;
               }
@@ -275,6 +413,7 @@ float __attribute__((hot,always_inline)) IRAM_ATTR Voice::nextSample() {
         default:
             phase += effectivePhaseIncrement;
             if (phase >= length) {
+                releaseSample();
                 active = false;
                 return 0.0f;
             }
@@ -282,6 +421,7 @@ float __attribute__((hot,always_inline)) IRAM_ATTR Voice::nextSample() {
     }
 
     if (ampEnv.isIdle()) {
+        releaseSample();
         active = false;
         return 0.0f;
     }
@@ -297,7 +437,7 @@ void Voice::renderBlock(float* block) {
 }
 
 void Voice::updateScore() {
-    if (!active || !sample) {
+    if (!active || !sampleHandle) {
         score = 0.0f;
         return;
     }
@@ -348,17 +488,18 @@ void __attribute__((always_inline))  Voice::updatePitchFactors() {
     // modFactor = ...
 }
 
-
 void Voice::init() {
     active = false;
     panL = 1.0f;
     panR = 1.0f;
     velocityVolume = 1.0f;
-    sample = nullptr;
+
+    sampleHandle = nullptr;
+    data = nullptr;
+
     ampEnv.init(SAMPLE_RATE);
     id = usage;
     usage++;
-    ESP_LOGD(TAG, "id=%d sr=%d", id, SAMPLE_RATE);
 }
 
 void Voice::printState() {

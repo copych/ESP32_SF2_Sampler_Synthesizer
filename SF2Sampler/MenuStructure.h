@@ -26,57 +26,57 @@ inline bool endsWithIgnoreCase(const String& str, const String& suffix) {
     return str.substring(str.length() - suffix.length()).equalsIgnoreCase(suffix);
 }
 
-inline bool folderContainsSf2(fs::FS& fs, const String& path) {
-    File dir = fs.open(path);
-    if (!dir || !dir.isDirectory()) return false;
-
-    File entry;
-    while ((entry = dir.openNextFile())) {
-        String name = entry.name();
-        if (entry.isDirectory()) {
-            if (folderContainsSf2(fs, name)) return true;  // recurse
-        } else if (endsWithIgnoreCase(name, ".sf2")) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static MenuItem createFileBrowserMenu(Synth& synth, fs::FS& fs, const String& path, FileSystemType type, const String& label) {
-    return MenuItem::Submenu("▶" + label, [=, &synth, &fs]() {
+    // These callbacks outlive this function call. Capture stable object pointers
+    // by value instead of capturing reference parameters by reference.
+    Synth* synthPtr = &synth;
+    fs::FS* fsPtr = &fs;
+
+    return MenuItem::Submenu("▶" + label, [=]() {
         std::vector<MenuItem> items;
-        File dir = fs.open(path);
+        File dir = fsPtr->open(path);
 
-        if (!dir || !dir.isDirectory()) return items;
+        if (!dir || !dir.isDirectory()) {
+            if (dir) dir.close();
+            return items;
+        }
 
-        File entry;
-        while ((entry = dir.openNextFile())) {
+        for (;;) {
+            File entry = dir.openNextFile();
+            if (!entry) break;
+
+            // Copy everything needed from the directory entry before closing
+            // its file handle. This keeps SD_MMC's open-file count bounded and
+            // makes repeated browsing deterministic.
+            const bool isDir = entry.isDirectory();
             String entryName = entry.name();
+            entry.close();
 
-            // Normalize path to full absolute path
             String fullPath = entryName;
             if (!entryName.startsWith("/")) {
                 fullPath = path + "/" + entryName;
             }
-
-            // Sanitize (avoid "//")
             fullPath.replace("//", "/");
 
-            if (entry.isDirectory()) {
-                if (folderContainsSf2(fs, fullPath)) {
-                    String label = fullPath.substring(fullPath.lastIndexOf("/") + 1);
-                    items.push_back(createFileBrowserMenu(synth, fs, fullPath, type, label));
-                }
+            if (isDir) {
+                // Lazy browsing: every directory is visible immediately; its
+                // contents are enumerated only after the user enters it.
+                String childLabel = fullPath.substring(fullPath.lastIndexOf("/") + 1);
+                items.push_back(createFileBrowserMenu(*synthPtr, *fsPtr, fullPath, type, childLabel));
             } else if (endsWithIgnoreCase(entryName, ".sf2")) {
-                items.push_back(MenuItem::Action(entryName, [=, &synth](TextGUI& gui) {
-                    synth.setFileSystem(type);
-                    gui.busyMessage( "Loading...");
-                    synth.loadSf2File(fullPath.c_str());
+                String fileLabel = entryName.substring(entryName.lastIndexOf("/") + 1);
+                items.push_back(MenuItem::Action(fileLabel, [=](TextGUI& gui) {
+                    synthPtr->setFileSystem(type);
+                    gui.beginLoading("Loading SF2...");
+                    synthPtr->loadSf2File(fullPath.c_str());
+                    gui.endLoading();
                 }));
             }
         }
+
+        dir.close();
         return withFallback(items);
-    });
+    }, true);
 }
 
 static MenuItem createProgramMenu(Synth& synth, uint8_t channel) {
@@ -336,14 +336,14 @@ std::vector<MenuItem> createRootMenu(Synth& synth, SynthState& state) {
     menu.push_back(MenuItem::Submenu("System", [&synth]() {
         return std::vector<MenuItem>{
             MenuItem::Action("Save Settings", [&synth](TextGUI& gui) {
-                gui.busyMessage( "Saving setup...");
-                delay(300);
+                gui.beginBusy("Saving setup...");
                 synth.saveSynthState();
+                gui.endBusy();
             }),
             MenuItem::Action("Load Settings", [&synth](TextGUI& gui) {
-                gui.busyMessage( "Loading setup...");
-                delay(300);
+                gui.beginBusy("Loading setup...");
                 synth.loadSynthState();
+                gui.endBusy();
             }),
             MenuItem::Action("Reset All", [&synth](TextGUI&) {
                 synth.GMReset();

@@ -26,6 +26,10 @@
 #include "esp_log.h"
 #include "operators.h"
 
+#include "SamplePool.h"
+extern SamplePool samplePool;
+extern uint8_t* g_sd_dma_buf ;
+
 static const char* TAG = "SF2Parser";
 
 static float timecentsToSec(int tc) {
@@ -57,6 +61,76 @@ struct INST { char name[20]; uint16_t bagIndex; };
 struct IBAG { uint16_t genIndex, modIndex; };
 struct IGEN { uint16_t oper; int16_t amount; };
 
+inline bool isInstrumentOp(uint16_t op)
+{
+    return op == (uint16_t)GeneratorOperator::Instrument;
+}
+
+inline bool isSampleIdOp(uint16_t op)
+{
+    return op == (uint16_t)GeneratorOperator::SampleID;
+}
+
+inline bool isRangeOp(uint16_t op)
+{
+    return op == (uint16_t)GeneratorOperator::KeyRange ||
+           op == (uint16_t)GeneratorOperator::VelRange;
+}
+
+std::vector<SampleHeader*> SF2Parser::getSamplesForPreset(uint16_t bank, uint16_t program)
+{
+    std::vector<SampleHeader*> result;
+    result.reserve(64); // avoid realloc
+
+    // simple dedup (pointer compare, no hash)
+    auto exists = [&](SampleHeader* s) {
+        for (auto* e : result)
+            if (e == s) return true;
+        return false;
+    };
+
+    for (auto &preset : presets)
+    {
+        if (preset.bank != bank || preset.program != program)
+            continue;
+
+        for (auto &pzone : preset.zones)
+        {
+            for (auto &g : pzone.generators)
+            {
+                if (!isInstrumentOp(g.oper))
+                    continue;
+
+                uint16_t instID = g.amount.uAmount;
+                if (instID >= instruments.size())
+                    continue;
+
+                auto &inst = instruments[instID];
+
+                for (auto &izone : inst.zones)
+                {
+                    for (auto &ig : izone.generators)
+                    {
+                        if (!isSampleIdOp(ig.oper))
+                            continue;
+
+                        uint16_t sid = ig.amount.uAmount;
+                        if (sid >= samples.size())
+                            continue;
+
+                        SampleHeader* s = &samples[sid];
+
+                        if (!exists(s))
+                            result.push_back(s);
+                    }
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
 void decodeGeneratorAmount(Generator& gen, uint16_t raw) {
     auto op = static_cast<GeneratorOperator>(gen.oper);
 
@@ -85,14 +159,25 @@ void decodeGeneratorAmount(Generator& gen, uint16_t raw) {
 SF2Parser::SF2Parser(const char* path, fs::FS* fs) : filepath(path), filesystem(fs) {}
 
 bool SF2Parser::parse() {
-    clear();
-    //file = LittleFS.open(filepath, "r");
+    clear(); 
+    if (file) file.close();
+    
     file = filesystem->open(filepath, "r");
-
+    
     if (!file){ 
         ESP_LOGE(TAG, "Error: File not found");
         return false;
     }
+
+    // Offsets belong to the newly opened file. Do not reuse values left by a
+    // previous parse, and do not derive smplStart before the RIFF/LIST scan.
+    smplStart = 0;
+    sdtaOffset = 0;
+    sdtaSize = 0;
+    shdrOffset = 0;
+    pdtaOffset = 0;
+    pdtaSize = 0;
+
     if (!parseHeaderChunks()) {
       ESP_LOGE(TAG, "Error: Invalid SF2 format");
       return false;
@@ -111,15 +196,9 @@ bool SF2Parser::parse() {
     }  else {
       ESP_LOGI(TAG, "PDTA OK");
     }
-    if (!loadSampleDataToMemory()) {
-        ESP_LOGE(TAG, "Failed to load all sample data into memory, some samples may not play");
-        //optionally bind all absent samples to the first sample
-        //return false;
-    } else {
-        ESP_LOGI(TAG, "Memory load OK");
-    }
-
-    file.close();
+	//file.seek(0, SeekSet);
+    //file.close();
+    dumpInstrumentSizes();
     return true;
 }
 
@@ -177,10 +256,49 @@ bool SF2Parser::parseHeaderChunks() {
 
 
 bool SF2Parser::parseSDTA() {
+    // parseHeaderChunks() leaves sdtaOffset at the first subchunk inside the
+    // LIST 'sdta'.  A sample header's start/end fields are sample-point
+    // offsets relative to the payload of the 'smpl' subchunk, not relative to
+    // the beginning of the SF2 file or to the 'smpl' chunk header.
+    if (sdtaOffset == 0 || sdtaSize < 8) {
+        ESP_LOGE(TAG, "Invalid sdta location: offset=%lu size=%lu",
+                 (unsigned long)sdtaOffset, (unsigned long)sdtaSize);
+        return false;
+    }
+
     seekTo(sdtaOffset);
+
     char id[5] = {0};
-    file.readBytes(id, 4);
-    return (strncmp(id, "smpl", 4) == 0);
+    uint32_t size = 0;
+
+    if (file.readBytes(id, 4) != 4 ||
+        file.readBytes((char*)&size, sizeof(size)) != sizeof(size)) {
+        ESP_LOGE(TAG, "Failed to read sdta subchunk header");
+        return false;
+    }
+
+    if (strncmp(id, "smpl", 4) != 0) {
+        ESP_LOGE(TAG, "Expected smpl at sdta offset %lu, found '%.4s'",
+                 (unsigned long)sdtaOffset, id);
+        return false;
+    }
+
+    // file.position() is now the first byte of 16-bit PCM sample data.
+    smplStart = file.position();
+
+    const uint32_t sdtaEnd = sdtaOffset + sdtaSize;
+    if (smplStart > sdtaEnd || size > (sdtaEnd - smplStart)) {
+        ESP_LOGE(TAG,
+                 "Invalid smpl bounds: start=%lu size=%lu sdtaEnd=%lu",
+                 (unsigned long)smplStart, (unsigned long)size,
+                 (unsigned long)sdtaEnd);
+        smplStart = 0;
+        return false;
+    }
+
+    ESP_LOGI(TAG, "smpl data offset: %lu size: %lu",
+             (unsigned long)smplStart, (unsigned long)size);
+    return true;
 }
 
 
@@ -200,6 +318,7 @@ bool SF2Parser::parsePDTA() {
     std::vector<IBAG> ibags;
     std::vector<IGEN> igens;
 
+
     while (file.position() + 8 <= pdtaEnd) {
         uint32_t chunkStart = file.position();
 
@@ -215,7 +334,7 @@ bool SF2Parser::parsePDTA() {
             for (uint32_t i = 0; i < count; ++i) {
                 PHDR p;
                 file.readBytes((char*)&p, sizeof(PHDR));
-                phdrs.push_back(p);
+                phdrs.push_back(std::move(p));
                 ESP_LOGD(TAG, "PHDR[%u]: name='%s' preset=%u bank=%u bagIndex=%u",
                          i, p.name, p.preset, p.bank, p.bagIndex);
             }
@@ -225,7 +344,7 @@ bool SF2Parser::parsePDTA() {
             for (uint32_t i = 0; i < count; ++i) {
                 PBAG b;
                 file.readBytes((char*)&b, sizeof(PBAG));
-                pbags.push_back(b);
+                pbags.push_back(std::move(b));
             }
         }
         else if (strncmp(id, "pgen", 4) == 0) {
@@ -233,7 +352,7 @@ bool SF2Parser::parsePDTA() {
             for (uint32_t i = 0; i < count; ++i) {
                 PGEN g;
                 file.readBytes((char*)&g, sizeof(PGEN));
-                pgens.push_back(g);
+                pgens.push_back(std::move(g));
             }
         }
         else if (strncmp(id, "inst", 4) == 0) {
@@ -241,7 +360,7 @@ bool SF2Parser::parsePDTA() {
             for (uint32_t i = 0; i < count; ++i) {
                 INST n;
                 file.readBytes((char*)&n, sizeof(INST));
-                insts.push_back(n);
+                insts.push_back(std::move(n));
             }
         }
         else if (strncmp(id, "ibag", 4) == 0) {
@@ -249,7 +368,7 @@ bool SF2Parser::parsePDTA() {
             for (uint32_t i = 0; i < count; ++i) {
                 IBAG b;
                 file.readBytes((char*)&b, sizeof(IBAG));
-                ibags.push_back(b);
+                ibags.push_back(std::move(b));
             }
         }
         else if (strncmp(id, "igen", 4) == 0) {
@@ -257,7 +376,7 @@ bool SF2Parser::parsePDTA() {
             for (uint32_t i = 0; i < count; ++i) {
                 IGEN g;
                 file.readBytes((char*)&g, sizeof(IGEN));
-                igens.push_back(g);
+                igens.push_back(std::move(g));
             }
         }
         else if (strncmp(id, "shdr", 4) == 0) {
@@ -284,29 +403,33 @@ bool SF2Parser::parsePDTA() {
         }
     }
 
-    // Добавляем фиктивные окончания
+    // adding dummy paddings at the end
     phdrs.push_back(PHDR{.bagIndex = static_cast<uint16_t>(pbags.size())});
     pbags.push_back(PBAG{.genIndex = static_cast<uint16_t>(pgens.size())});
     insts.push_back(INST{.bagIndex = static_cast<uint16_t>(ibags.size())});
     ibags.push_back(IBAG{.genIndex = static_cast<uint16_t>(igens.size())});
 
-    // Сохраняем структуры
+    // saving structs
     this->presets.clear();
+    this->presets.reserve(phdrs.size());
     this->instruments.clear();
+    this->instruments.reserve(insts.size());
+
 
     for (size_t i = 0; i + 1 < phdrs.size(); ++i) {
-        SF2Preset preset;
+        SF2Preset preset; 
         preset.name = String(phdrs[i].name);
         preset.bank = phdrs[i].bank;
         preset.program = phdrs[i].preset;
 
         for (uint16_t b = phdrs[i].bagIndex; b < phdrs[i + 1].bagIndex; ++b) {
             SF2Zone zone;
+            zone.generators.reserve(16);
             for (uint16_t g = pbags[b].genIndex; g < pbags[b + 1].genIndex; ++g) {
                 Generator gen;
                 gen.oper = pgens[g].oper;
                 gen.amount.sAmount = pgens[g].amount;
-                zone.generators.push_back(gen);
+                zone.generators.push_back(std::move(gen));
             }
 
             bool hasInstrument = std::any_of(zone.generators.begin(), zone.generators.end(), [](const Generator& g) {
@@ -314,19 +437,19 @@ bool SF2Parser::parsePDTA() {
             });
 
             if (hasInstrument) {
-                preset.zones.push_back(zone);
+                preset.zones.push_back(std::move(zone));
             } else {
-                preset.globalGenerators = zone.generators;  // <<< here
+                preset.globalGenerators = zone.generators;  
             }
             
  
         }
 
-        this->presets.push_back(preset);
+        this->presets.push_back(std::move(preset));
     }
 
     for (size_t i = 0; i + 1 < insts.size(); ++i) {
-        SF2Instrument inst;
+        SF2Instrument inst; 
         inst.name = String(insts[i].name);
 
         for (uint16_t b = insts[i].bagIndex; b < insts[i + 1].bagIndex; ++b) {
@@ -335,7 +458,7 @@ bool SF2Parser::parsePDTA() {
                 Generator gen;
                 gen.oper = igens[g].oper;
                 decodeGeneratorAmount(gen, igens[g].amount);
-                zone.generators.push_back(gen);
+                zone.generators.push_back(std::move(gen));
             }
 
             bool hasSampleID = std::any_of(zone.generators.begin(), zone.generators.end(), [](const Generator& g) {
@@ -343,14 +466,14 @@ bool SF2Parser::parsePDTA() {
             });
 
             if (hasSampleID) {
-                inst.zones.push_back(zone);
+                inst.zones.push_back(std::move(zone));
             } else {
-                inst.globalGenerators = zone.generators;  // <<< inject this
+                inst.globalGenerators = zone.generators;  
             }
 
         }
 
-        this->instruments.push_back(inst);
+        this->instruments.push_back(std::move(inst));
     }
 
     ESP_LOGD(TAG, "PDTA parsed successfully: phdr=%zu pbags=%zu pgens=%zu instruments=%zu",
@@ -363,9 +486,9 @@ bool SF2Parser::parsePDTA() {
 
 bool SF2Parser::readSampleHeaders(uint32_t offset, uint32_t size) {
     seekTo(offset);
-    size_t count = size / 46; // Каждая запись — 46 байт
+    size_t count = size / 46; // every single record occupies 46 bytes
     samples.clear();
-
+    samples.reserve(count);
     for (size_t i = 0; i < count; ++i) {
         
         SampleHeader sample;
@@ -376,7 +499,8 @@ bool SF2Parser::readSampleHeaders(uint32_t offset, uint32_t size) {
             continue;
         }
 
-        sampleMap[i] = &samples.emplace_back(sample);
+        samples.emplace_back(sample);
+        sampleMap[i] = &samples.back();
         ESP_LOGD(TAG, "Loaded sample %zu: %s (start=%u, end=%zu), orig=%d, sr=%u", i, sample.name, sample.start, sample.end, sample.originalPitch, sample.sampleRate);
     }
 
@@ -385,6 +509,9 @@ bool SF2Parser::readSampleHeaders(uint32_t offset, uint32_t size) {
     ESP_LOGD(TAG, "readSampleHeaders(): file.position() after read = %u, expected = %u",
              file.position(), offset + size);
     ESP_LOGD(TAG, "Total samples loaded: %zu", samples.size());
+    for (uint32_t i = 0; i < samples.size(); ++i) {
+        samples[i].sampleID = i;
+    }
     return true;
 }
 
@@ -429,11 +556,16 @@ std::vector<Zone> SF2Parser::getZonesForNote(uint8_t note, uint8_t velocity, uin
                     velocity >= velLo && velocity <= velHi) {
 
                     Zone z{};
+
+                    z.sampleID = sampleIndex;
+ 
                     z.sample = &samples[sampleIndex];
+
                     z.keyLo = keyLo;
                     z.keyHi = keyHi;
                     z.velLo = velLo;
                     z.velHi = velHi;
+
                     z.rootKey = z.sample->originalPitch;
 
                     // Apply generator hierarchy
@@ -452,9 +584,89 @@ std::vector<Zone> SF2Parser::getZonesForNote(uint8_t note, uint8_t velocity, uin
     return resultZones;
 }
 
+bool SF2Parser::preloadAllIntoPool() {
+    for (uint32_t sid = 0; sid < samples.size(); ++sid) {
+        if (!readSampleIntoPool(sid)) {
+            ESP_LOGW("POOL", "LOAD FAIL sid=%u", sid);
+            return false; // pool too small or read error
+        }
+    }
+    return true;
+}
 
+SampleHandle* SF2Parser::readSampleIntoPool(uint32_t sid) {
 
+    if (sid >= samples.size()) {
+        ESP_LOGE("POOL", "sid out of range: %u / %u", sid, samples.size());
+        return nullptr;
+    }
 
+    // parse() keeps the SF2 open for its entire active lifetime. Reopening here
+    // is only a recovery path; normal preset changes must not pay FAT open cost.
+    if (!file) {
+        file = filesystem->open(filepath, "r");
+        if (!file) {
+            ESP_LOGE("POOL", "file reopen failed");
+            return nullptr;
+        }
+    }
+
+    auto& s = samples[sid];
+
+    const uint32_t length = (s.end > s.start) ? (s.end - s.start) : 0;
+    const uint32_t bytes  = length << 1;
+
+    if (bytes == 0) {
+        ESP_LOGW("POOL", "empty sample sid=%u", sid);
+        return nullptr;
+    }
+
+    const uint32_t pos = smplStart + (s.start << 1);
+
+    // Samples are loaded in physical-offset order by Synth. Avoid even the
+    // high-level seek when the previous read already left us at this sample.
+    if (file.position() != pos && !file.seek(pos, SeekSet)) {
+        ESP_LOGE("POOL", "seek failed sid=%u pos=%u", sid, pos);
+        return nullptr;
+    }
+
+    SampleHandle* h = samplePool.insertEmpty(
+        sid, length,
+        s.startLoop - s.start, s.endLoop - s.start,
+        s.sampleRate, s.originalPitch, s.pitchCorrection
+    );
+
+    if (!h) {
+        ESP_LOGE("POOL", "pool alloc failed sid=%u len=%u bytes=%u", sid, length, bytes);
+        return nullptr;
+    }
+
+    uint8_t* dst = (uint8_t*)h->data;
+    uint32_t remaining = bytes;
+
+    while (remaining) {
+        const uint32_t chunk = (remaining > SAMPLE_IO_CHUNK_SIZE)
+                             ? SAMPLE_IO_CHUNK_SIZE : remaining;
+
+        uint32_t got = 0;
+        while (got < chunk) {
+            const size_t r = file.read(g_sd_dma_buf + got, chunk - got);
+            if (r == 0) {
+                ESP_LOGE("POOL", "read failed sid=%u pos=%u got=%u/%u",
+                         sid, (unsigned)file.position(), got, chunk);
+                samplePool.discard(sid);
+                return nullptr;
+            }
+            got += (uint32_t)r;
+        }
+
+        memcpy(dst, g_sd_dma_buf, chunk);
+        dst += chunk;
+        remaining -= chunk;
+    }
+
+    return h;
+}
 
 void SF2Parser::applyGenerators(const std::vector<Generator>& gens, Zone& zone) {
     for (const auto& g : gens) {
@@ -463,7 +675,7 @@ void SF2Parser::applyGenerators(const std::vector<Generator>& gens, Zone& zone) 
 
         switch (op) {
             case GeneratorOperator::SampleID:
-                zone.sample = resolveSample(g.amount.uAmount);
+                zone.sampleID = g.amount.uAmount;
                 break;
             case GeneratorOperator::KeyRange:
                 zone.keyLo = g.amount.range.lo;
@@ -500,6 +712,10 @@ void SF2Parser::applyGenerators(const std::vector<Generator>& gens, Zone& zone) 
             case GeneratorOperator::CoarseTune:
                 zone.coarseTune = val;
                 break;
+            case GeneratorOperator::ScaleTuning:
+                // SF2 unit: cents per MIDI key. Default is 100.
+                zone.scaleTuning = val;
+                break;
             case GeneratorOperator::AttackVolEnv:
                 zone.attackTime = timecentsToSec(val);
                 break;
@@ -515,8 +731,14 @@ void SF2Parser::applyGenerators(const std::vector<Generator>& gens, Zone& zone) 
             case GeneratorOperator::ReleaseVolEnv:
                 zone.releaseTime = timecentsToSec(val);
                 break;
+            case GeneratorOperator::DelayModEnv:
+                zone.modDelayTime = timecentsToSec(val);
+                break;
             case GeneratorOperator::AttackModEnv:
                 zone.modAttackTime = timecentsToSec(val);
+                break;
+            case GeneratorOperator::HoldModEnv:
+                zone.modHoldTime = timecentsToSec(val);
                 break;
             case GeneratorOperator::DecayModEnv:
                 zone.modDecayTime = timecentsToSec(val);
@@ -527,9 +749,13 @@ void SF2Parser::applyGenerators(const std::vector<Generator>& gens, Zone& zone) 
             case GeneratorOperator::ModEnvToPitch:
                 zone.modEnvToPitch = val;
                 break;
+            case GeneratorOperator::ModEnvToFilterFc:
+                zone.modEnvToFilterFc = val;
+                break;
             case GeneratorOperator::SustainModEnv:
-               // zone.modSustainLevel = powf(10.0f, -val / 200.0f);  // val is in centibels
-                zone.modSustainLevel = val * 0.001f ;  // map to 0..1
+                // SF2 sustainModEnv is attenuation from the envelope peak in 0.1% units:
+                // 0 -> level 1.0, 1000 -> level 0.0.
+                zone.modSustainLevel = fmaxf(0.0f, fminf(1.0f, 1.0f - val * 0.001f));
                 break;
             case GeneratorOperator::Pan:
                 zone.pan = val * 0.01f;
@@ -656,93 +882,24 @@ void SF2Parser::dumpPresetStructure() {
     ESP_LOGI(TAG, "========== End of Preset Dump ==========\n");
 }
 
-bool SF2Parser::loadSampleDataToMemory() {
-    if (sdtaOffset == 0 || samples.empty()) {
-        ESP_LOGE(TAG, "Sample data not available or no sample headers found");
-        return false;
-    }
-
-    file.seek(sdtaOffset);
-    char id[5] = {0};
-    file.readBytes(id, 4);
-
-    if (strncmp(id, "smpl", 4) != 0) {
-        ESP_LOGE(TAG, "Expected 'smpl' chunk not found");
-        return false;
-    }
-
-    uint32_t smplSize = 0;
-    file.readBytes((char*)&smplSize, 4);
-    uint32_t smplStart = file.position();
-
-    ESP_LOGI(TAG, "Reading sample data: offset=%u size=%u", smplStart, smplSize);
-
-    SampleHeader* fallback = nullptr;
-
-    for (size_t i = 0; i < samples.size(); ++i) {
-
-        auto& s = samples[i];
-        uint32_t length = (s.end > s.start) ? (s.end - s.start) : 0;
-
-        if (length == 0) {
-            ESP_LOGW(TAG, "Sample %zu (%s) has zero length", i, s.name);
-            continue;
-        }
-
-        s.data = (uint8_t*)heap_caps_aligned_alloc(4, length * sizeof(int16_t), MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
-
-        if (!s.data) {
-            ESP_LOGE(TAG, "PSRAM allocation failed for sample %zu (%s), size=%u", i, s.name, length * 2);
-
-            if (fallback) {
-                // Fallback: bind to first loaded sample
-                s.data = fallback->data;
-                s.dataSize = fallback->dataSize;
-                s.start = fallback->start;
-                s.end = fallback->end;
-                s.startLoop = fallback->startLoop;
-                s.endLoop = fallback->endLoop;
-                s.sampleRate = fallback->sampleRate;
-                s.originalPitch = fallback->originalPitch;
-                s.pitchCorrection = fallback->pitchCorrection;
-                s.sampleLink = fallback->sampleLink;
-                s.sampleType = fallback->sampleType;
-
-                ESP_LOGW(TAG, "Sample %zu (%s) will use fallback sample", i, s.name);
-                continue;
-            } else {
-                ESP_LOGE(TAG, "No fallback sample available — aborting");
-                return false;
-            }
-        }
-
-        file.seek(smplStart + s.start * 2); // 16-bit PCM
-        file.read((uint8_t*)s.data, length * 2);
-        s.dataSize = length * 2;
-
-        ESP_LOGD(TAG, "Loaded sample %zu: %s (offset=%u length=%u)", i, s.name, s.start, length);
-
-        if (!fallback)
-            fallback = &s;
-    }
-
-    return true;
-}
-
-
 void SF2Parser::clear() {
+    if (file) file.close();
+
     for (auto& sample : samples) {
-        if (sample.data) {
-            heap_caps_aligned_free(sample.data);
+        if (sample.data) { 
             sample.data = nullptr;
             sample.dataSize = 0;
         }
     }
 
     samples.clear();
+    samples.shrink_to_fit();
     presets.clear();
+    presets.shrink_to_fit();
     instruments.clear();
+    instruments.shrink_to_fit();
     zones.clear();
+    zones.shrink_to_fit();
     sampleMap.clear();
     startPosMap.clear();
 }
@@ -755,3 +912,71 @@ bool SF2Parser::hasPreset(uint16_t bank, uint16_t program) const {
     }
     return false;
 }
+
+void SF2Parser::dumpInstrumentSizes() {
+
+    struct Stat {
+        uint32_t totalBytes;
+        uint32_t uniqueSamples;
+    };
+
+    ESP_LOGI("SF2", "=== INSTRUMENT SIZE TABLE ===");
+    std::vector<uint8_t> used(samples.size());
+    for (const auto& preset : presets) {
+
+        uint32_t sampleMaskCount = samples.size();
+        uint8_t used[2048];
+        memset(used, 0, sampleMaskCount);
+
+        uint32_t totalBytes = 0;
+        uint32_t unique = 0;
+
+        for (const auto& pzone : preset.zones) {
+
+            int instIndex = -1;
+
+            for (const auto& g : pzone.generators) {
+                if ((GeneratorOperator)g.oper == GeneratorOperator::Instrument) {
+                    instIndex = g.amount.sAmount;
+                    break;
+                }
+            }
+
+            if (instIndex < 0 || instIndex >= instruments.size())
+                continue;
+
+            const auto& inst = instruments[instIndex];
+
+            for (const auto& izone : inst.zones) {
+
+                int sid = -1;
+
+                for (const auto& g : izone.generators) {
+                    if ((GeneratorOperator)g.oper == GeneratorOperator::SampleID) {
+                        sid = g.amount.sAmount;
+                        break;
+                    }
+                }
+
+                if (sid < 0 || sid >= (int)samples.size())
+                    continue;
+
+                if (!used[sid]) {
+                    used[sid] = 1;
+                    unique++;
+
+                    const auto& s = samples[sid];
+                    uint32_t len = (s.end > s.start) ? (s.end - s.start) : 0;
+                    totalBytes += (len << 1);
+                }
+            }
+        }
+
+        float mb = totalBytes / (1024.0f * 1024.0f);
+
+      //  ESP_LOGI("SF2", "Bank=%u Program=%u | Samples=%u | Size=%.2f MB", preset.bank, preset.program, unique, mb );
+    }
+
+    ESP_LOGI("SF2", "=== END ===");
+}
+
