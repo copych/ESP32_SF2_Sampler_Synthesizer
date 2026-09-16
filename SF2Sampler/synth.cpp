@@ -74,16 +74,16 @@ static void dump_mem_caps(const char* tag)
     size_t largest_dma    = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
     size_t largest_spiram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
 
-//    ESP_LOGI("MEM",
- //       "[%s] free: 8bit=%u dma=%u psram=%u | largest: 8bit=%u dma=%u psram=%u",
-  //      tag,
-  //      (unsigned)free_8bit,
-  //      (unsigned)free_dma,
-  //      (unsigned)free_spiram,
-  //      (unsigned)largest_8bit,
-  //      (unsigned)largest_dma,
-  //      (unsigned)largest_spiram
-  //  );
+    ESP_LOGI("MEM",
+        "[%s] free: 8bit=%u dma=%u psram=%u | largest: 8bit=%u dma=%u psram=%u",
+        tag,
+        (unsigned)free_8bit,
+        (unsigned)free_dma,
+        (unsigned)free_spiram,
+        (unsigned)largest_8bit,
+        (unsigned)largest_dma,
+        (unsigned)largest_spiram
+    );
 }
 
 #ifdef ENABLE_CH_FILTER_M
@@ -105,6 +105,7 @@ static void dump_mem_caps(const char* tag)
     extern FxDelay delayfx;
 #endif
 
+#include "LoadingProgress.h"
 #include "SamplePool.h"
 extern SamplePool samplePool;
 
@@ -640,6 +641,19 @@ void Synth::programChange(uint8_t ch, uint8_t program) {
 
     state.loadedSamples.reserve(needed.size());
 
+    // A standalone Program Change owns its progress scope. During a full SF2
+    // load, loadSf2File() owns one scope spanning all 16 GM-reset channels.
+    const bool ownLoadingProgress = !LoadingProgress::isActive();
+    if (ownLoadingProgress) {
+        uint64_t totalBytes = 0;
+        for (auto* sample : needed) {
+            if (!sample || sample->sampleID >= all.size()) continue;
+            if (!samplePool.get(sample->sampleID))
+                totalBytes += (uint64_t)(sample->end - sample->start) * sizeof(int16_t);
+        }
+        LoadingProgress::begin(totalBytes);
+    }
+
     uint32_t loaded = 0;
     uint32_t reused = 0;
     bool incrementalOk = true;
@@ -678,6 +692,7 @@ void Synth::programChange(uint8_t ch, uint8_t program) {
                 incrementalOk = false;
                 break;
             }
+            LoadingProgress::add((uint64_t)(sample->end - sample->start) * sizeof(int16_t));
             loaded++;
         } else {
      //       ESP_LOGI("PC", "FOUND sid=%u ptr=%p len=%u", sid, h->data, h->length);
@@ -701,6 +716,7 @@ void Synth::programChange(uint8_t ch, uint8_t program) {
         ESP_LOGI("PC", "incremental OK: loaded=%u reused=%u",
                  loaded, reused);
         dump_mem_caps("after_prog_ch");
+        if (ownLoadingProgress) LoadingProgress::finish();
         endAssetUpdate();
         return;
     }
@@ -745,6 +761,7 @@ void Synth::programChange(uint8_t ch, uint8_t program) {
                     rebuildOk = false;
                     break;
                 }
+                LoadingProgress::add((uint64_t)(sample->end - sample->start) * sizeof(int16_t));
                 rebuiltLoaded++;
             } else {
                 rebuiltReused++;
@@ -772,6 +789,7 @@ void Synth::programChange(uint8_t ch, uint8_t program) {
         }
         samplePool.reset();
         dump_mem_caps("after_prog_ch_fail");
+        if (ownLoadingProgress) LoadingProgress::finish();
         endAssetUpdate();
         return;
     }
@@ -779,6 +797,7 @@ void Synth::programChange(uint8_t ch, uint8_t program) {
     ESP_LOGI("PC", "full layout OK: loaded=%u reused=%u",
              rebuiltLoaded, rebuiltReused);
     dump_mem_caps("after_prog_ch_rebuild");
+    if (ownLoadingProgress) LoadingProgress::finish();
     endAssetUpdate();
 }
 
@@ -940,6 +959,7 @@ void   __attribute__((hot,always_inline)) IRAM_ATTR Synth::renderLRBlock(float* 
         outL[i] += delL[i]; outR[i] += delR[i];
 #endif
 
+
         outL[i] = dcL.process(outL[i]);
         outR[i] = dcR.process(outR[i]);
 
@@ -1010,17 +1030,17 @@ void Synth::updateScores() {
 
     // Diagnostics are reported from Core1 only. No serial/log formatting occurs
     // on the audio core. Keep reporting sparse and silent when nothing happened.
-    static uint32_t nextVoiceDiagMs = 0;
-    const uint32_t now = millis();
-    if ((int32_t)(now - nextVoiceDiagMs) >= 0) {
-        nextVoiceDiagMs = now + 1000;
+    //static uint32_t nextVoiceDiagMs = 0;
+    //const uint32_t now = millis();
+ //   if ((int32_t)(now - nextVoiceDiagMs) >= 0) {
+   //     nextVoiceDiagMs = now + 1000;
 
-        const uint32_t lockMisses = __atomic_exchange_n(&gVoiceLockMissCount, 0, __ATOMIC_RELAXED);
-        const uint32_t badFetches = takeVoiceBadFetchCount();
-        if (lockMisses || badFetches) {
-            ESP_LOGW(TAG, "[AUDIO DIAG] voiceLockMiss=%u badFetch=%u", lockMisses, badFetches);
-        }
-    }
+   //     const uint32_t lockMisses = __atomic_exchange_n(&gVoiceLockMissCount, 0, __ATOMIC_RELAXED);
+   //     const uint32_t badFetches = takeVoiceBadFetchCount();
+   //     if (lockMisses || badFetches) {
+   //         ESP_LOGW(TAG, "[AUDIO DIAG] voiceLockMiss=%u badFetch=%u", lockMisses, badFetches);
+   //     }
+  //  }
 }
 
 void Synth::reset() {
@@ -1259,7 +1279,28 @@ bool Synth::loadSf2File(const char* filename) {
     }
     dump_mem_caps("after_pool_init");
 
+    // GMReset will load Program 0 for all channels (drum bank on ch10).
+    // Build a deduplicated byte total so the 16-bar meter advances according
+    // to actual PCM volume rather than sample count.
+    {
+        auto& allSamples = parser.getSamples();
+        std::vector<uint8_t> seen(allSamples.size(), 0);
+        uint64_t totalBytes = 0;
+        for (uint8_t ch = 0; ch < 16; ++ch) {
+            const uint16_t bank = (ch == 9) ? 128 : 0;
+            auto req = parser.getSamplesForPreset(bank, 0);
+            for (auto* sample : req) {
+                if (!sample || sample->sampleID >= allSamples.size()) continue;
+                if (seen[sample->sampleID]) continue;
+                seen[sample->sampleID] = 1;
+                totalBytes += (uint64_t)(sample->end - sample->start) * sizeof(int16_t);
+            }
+        }
+        LoadingProgress::begin(totalBytes);
+    }
+
     GMReset();
+    LoadingProgress::finish();
 
     currentSf2Path = fullPath;
     endAssetUpdate();

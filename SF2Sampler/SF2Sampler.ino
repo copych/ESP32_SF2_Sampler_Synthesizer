@@ -237,19 +237,6 @@ static void IRAM_ATTR control_task(void *userData) {
         vTaskDelay(1);
         taskYIELD();
 
-#ifdef ENABLE_GUI
-        if (__builtin_expect((gui_blocker == 0), 1)) {
-            // Read GUI input
-            gui.encA = digitalRead(ENC0_A_PIN);
-            gui.encB = digitalRead(ENC0_B_PIN);
-            gui.btnState = digitalRead(BTN0_PIN);
-            
-            gui.process();
-        } else {
-            gui_blocker--;
-            if (gui_blocker < 0) { gui_blocker = 0; }
-        }
-#endif
         
         if (frame_count >= 64) {
 
@@ -280,9 +267,22 @@ static void IRAM_ATTR gui_task(void *userData) {
     
     while (true) {
         if (gui_blocker == 0) {
+            // GUITask is the sole owner of all GUI state and U8g2 access.
+            // Keeping input processing and display I/O in one task prevents
+            // U8g2/SPI transactions from being interleaved by ControlTask.
+            gui.encA = digitalRead(ENC0_A_PIN);
+            gui.encB = digitalRead(ENC0_B_PIN);
+            gui.btnState = digitalRead(BTN0_PIN);
+
+            gui.process();
             gui.draw();
+        } else {
+            --gui_blocker;
         }
-        taskYIELD();
+
+        // Also keeps block_gui() close to its previous ~100 ms behaviour
+        // instead of burning through the counter in a tight yield loop.
+        vTaskDelay(1);
     }
 
 }
@@ -419,3 +419,4 @@ void loop() {
     vTaskDelay(100); 
     vTaskDelete(NULL);
 }
+

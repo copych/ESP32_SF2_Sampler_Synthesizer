@@ -31,6 +31,27 @@
 extern SamplePool samplePool;
 static const char* TAG = "Voice";
 
+// -----------------------------------------------------------------------------
+// Temporary start-of-sample diagnostics.
+// Set VOICE_START_DIAG_NOTE to a MIDI note (0..127) to reduce log volume.
+// -1 logs every started note.  All logging is from Core1/startNew path, never
+// from nextSample()/Core0.
+// -----------------------------------------------------------------------------
+#ifndef VOICE_START_DIAG
+#define VOICE_START_DIAG 1
+#endif
+#ifndef VOICE_START_DIAG_NOTE
+#define VOICE_START_DIAG_NOTE -1
+#endif
+
+static inline bool voiceStartDiagEnabled(uint8_t note) {
+#if VOICE_START_DIAG
+    return VOICE_START_DIAG_NOTE < 0 || note == VOICE_START_DIAG_NOTE;
+#else
+    return false;
+#endif
+}
+
 // Audio-thread diagnostics: increment only on an already exceptional path.
 // Reporting is performed from Core1; never log from nextSample().
 static volatile uint32_t gVoiceBadFetchCount = 0;
@@ -45,6 +66,51 @@ inline float velocityToGain(uint32_t velocity) {
     //return powf(velocity, 0.6f); // 0.6 = 60% powerlaw, approximating sqrt()
 }
 
+
+
+// Static approximation of the SF2 modulation envelope.
+// Integrate a piecewise-linear D/A/H/D/S envelope over the first 250 ms.
+// Called only during voice preparation; no runtime envelope state/cost.
+static float approximateModEnv250ms(const Zone& z) {
+    constexpr float W = 0.250f;
+    float area = 0.0f;
+    float t = 0.0f;
+
+    // Delay: E = 0.
+    float dt = fminf(z.modDelayTime, W);
+    t += dt;
+    if (t >= W) return 0.0f;
+
+    // Attack: linear 0 -> 1. Handle a window ending inside attack.
+    if (z.modAttackTime > 0.0f) {
+        dt = fminf(z.modAttackTime, W - t);
+        const float e1 = dt / z.modAttackTime;
+        area += dt * 0.5f * e1;
+        t += dt;
+        if (t >= W) return area / W;
+        if (dt < z.modAttackTime) return area / W;
+    }
+
+    // Hold: E = 1.
+    dt = fminf(z.modHoldTime, W - t);
+    area += dt;
+    t += dt;
+    if (t >= W) return area / W;
+
+    // Decay: linear 1 -> sustain. Handle a window ending inside decay.
+    if (z.modDecayTime > 0.0f) {
+        dt = fminf(z.modDecayTime, W - t);
+        const float k = dt / z.modDecayTime;
+        const float e1 = 1.0f + (z.modSustainLevel - 1.0f) * k;
+        area += dt * 0.5f * (1.0f + e1);
+        t += dt;
+        if (t >= W) return area / W;
+    }
+
+    // Sustain for the remainder of the 250 ms window.
+    if (t < W) area += (W - t) * z.modSustainLevel;
+    return area / W;
+}
 
 void Voice::prepareStart(uint8_t ch, uint8_t note_, uint8_t vel, const Zone& z, ChannelState* chan) {
     zone = z;
@@ -86,13 +152,24 @@ void Voice::prepareStart(uint8_t ch, uint8_t note_, uint8_t vel, const Zone& z, 
 
     velocityVolume = velocityToGain(velocity) * zone.attenuation;
 
-    float modEnvStaticTune = (zone.modAttackTime < 1.0f) ?
-        (1.0f - zone.modSustainLevel) * zone.modEnvToPitch * 0.01f : 0.0f;
-
     int rootKey = (zone.rootKey >= 0) ? zone.rootKey : sampleHandle->rootKey;
-    float semi = float(note_ - rootKey) + zone.coarseTune + zone.fineTune + chan->tuningSemitones;
 
-    float noteRatio = exp2f((modEnvStaticTune + semi) * DIV_12);
+    // Static SF2 pitch. ScaleTuning is cents/key (100 = equal-tempered
+    // semitone spacing). shdr pitchCorrection is a signed cent correction
+    // applied to the sample playback rate. ModEnvToPitch is represented by
+    // the analytically averaged first 250 ms of the modulation envelope.
+    const float staticModEnv = approximateModEnv250ms(zone);
+    const float keySemi = float(note_ - rootKey) * (zone.scaleTuning * 0.01f);
+    const float sampleCorrectionSemi = float(sampleHandle->pitchCorrection) * 0.01f;
+    const float modEnvPitchSemi = staticModEnv * zone.modEnvToPitch * 0.01f;
+    const float semi = keySemi
+                     + zone.coarseTune
+                     + zone.fineTune
+                     + sampleCorrectionSemi
+                     + modEnvPitchSemi
+                     + chan->tuningSemitones;
+
+    float noteRatio = exp2f(semi * DIV_12);
     float baseStep = float(sampleHandle->sampleRate) * DIV_SAMPLE_RATE;
     basePhaseIncrement = baseStep * noteRatio;
 
@@ -147,7 +224,10 @@ void Voice::prepareStart(uint8_t ch, uint8_t note_, uint8_t vel, const Zone& z, 
     }
 
 #ifdef ENABLE_IN_VOICE_FILTERS
-    filterCutoff = fclamp(zone.filterFc, 10.0f, 20000.0f);
+    // ModEnvToFilterFc is in absolute cents relative to InitialFilterFc.
+    // Use the same 250 ms static envelope approximation as pitch.
+    const float modFilterRatio = exp2f((staticModEnv * zone.modEnvToFilterFc) / 1200.0f);
+    filterCutoff = fclamp(zone.filterFc * modFilterRatio, 10.0f, 20000.0f);
     filterResonance = (zone.filterQ <= 0.0f) ? 0.707f : 1.0f / powf(10.0f, zone.filterQ / 20.0f);
     filter.resetState();
     filter.setFreqAndQ(filterCutoff, filterResonance);
@@ -175,7 +255,16 @@ void Voice::updatePitchOnly(uint8_t newNote, ChannelState* chan) {
 
     int rootKey = (zone.rootKey >= 0) ? zone.rootKey : sampleHandle->rootKey;
 
-    float semi = float(newNote - rootKey) + zone.coarseTune + zone.fineTune;
+    const float staticModEnv = approximateModEnv250ms(zone);
+    const float keySemi = float(newNote - rootKey) * (zone.scaleTuning * 0.01f);
+    const float sampleCorrectionSemi = float(sampleHandle->pitchCorrection) * 0.01f;
+    const float modEnvPitchSemi = staticModEnv * zone.modEnvToPitch * 0.01f;
+    const float semi = keySemi
+                     + zone.coarseTune
+                     + zone.fineTune
+                     + sampleCorrectionSemi
+                     + modEnvPitchSemi
+                     + chan->tuningSemitones;
     float noteRatio = exp2f(semi * DIV_12);
 
     basePhaseIncrement = float(sampleHandle->sampleRate) * DIV_SAMPLE_RATE * noteRatio;
@@ -183,7 +272,7 @@ void Voice::updatePitchOnly(uint8_t newNote, ChannelState* chan) {
     portamentoActive = modPortamento && *modPortamento;
 
     if (portamentoActive) {
-        float noteDiff = float(newNote - chan->portaCurrentNote);
+        float noteDiff = float(newNote - chan->portaCurrentNote) * (zone.scaleTuning * 0.01f);
         float freqRatio = exp2f(noteDiff * DIV_12);
         float timeSec = 0.01f + (*modPortaTime) * 0.5f;
         float totalSamples = timeSec * SAMPLE_RATE;
@@ -238,9 +327,8 @@ float __attribute__((hot,always_inline)) IRAM_ATTR Voice::nextSample() {
         return 0.0f;
     }
 
-    // effectivePhaseIncrement is prepared on Core1 by updateScores().
-    // Keep pitch-factor math out of the per-sample audio hot path.
-
+    updatePitch();
+    
     // for syncing time-based functions (like LFOs)
     samplesRun++;
     
@@ -272,8 +360,6 @@ if (__builtin_expect(
 
     // Envelope process
     float env = ampEnv.process();
-    // Velocity / channel volume / expression are applied once per voice block
-    // in Synth::renderLRBlock(). Do not apply them again per sample here.
     float val = smp * env;
 
 #ifdef ENABLE_IN_VOICE_FILTERS

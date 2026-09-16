@@ -101,6 +101,9 @@ public:
     void fullUpdate();
     void busyMessage(const String& str);
     void beginBusy(const String& str = "Waiting...");
+    void beginLoading(const String& str = "Loading...");
+    void endLoading();
+    void serviceLoadingProgress(uint8_t progress);
     void endBusy();
 
     // Navigation methods
@@ -131,7 +134,10 @@ private:
     std::vector<MenuContext> menuStack;
     int cursorPos = 0;
     bool needsRedraw = true;
-    volatile bool busy = false;
+    bool displayUpdateInProgress = false;
+    int updateTileX = 0;
+    int updateTileY = 0;
+    bool busy = false;
     
 
     // Initial menu setup
@@ -142,6 +148,14 @@ private:
     void onButtonEvent(MuxButton::btnEvents evt);
     
     // Rendering
+    void renderLoadingMeter(uint8_t progress);
+    static void loadingPumpThunk(void* ctx, uint8_t progress);
+    uint8_t lastLoadingProgress = 0xFF;
+    uint32_t lastLoadingRevision = 0;
+    uint8_t lastActivityLevels[16] = {0};
+    bool activityLevelsValid = false;
+    String loadingMessage;
+
     void renderDisplay();
     void renderMenu();
     void renderStatusBar();

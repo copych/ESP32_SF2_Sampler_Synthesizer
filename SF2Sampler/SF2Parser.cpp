@@ -169,16 +169,14 @@ bool SF2Parser::parse() {
         return false;
     }
 
-    file.seek(sdtaOffset);
-
-    char id[4];
-    file.readBytes(id, 4);
-
-    uint32_t size;
-    file.readBytes((char*)&size, 4);
-
-    smplStart = file.position();
-
+    // Offsets belong to the newly opened file. Do not reuse values left by a
+    // previous parse, and do not derive smplStart before the RIFF/LIST scan.
+    smplStart = 0;
+    sdtaOffset = 0;
+    sdtaSize = 0;
+    shdrOffset = 0;
+    pdtaOffset = 0;
+    pdtaSize = 0;
 
     if (!parseHeaderChunks()) {
       ESP_LOGE(TAG, "Error: Invalid SF2 format");
@@ -258,10 +256,49 @@ bool SF2Parser::parseHeaderChunks() {
 
 
 bool SF2Parser::parseSDTA() {
+    // parseHeaderChunks() leaves sdtaOffset at the first subchunk inside the
+    // LIST 'sdta'.  A sample header's start/end fields are sample-point
+    // offsets relative to the payload of the 'smpl' subchunk, not relative to
+    // the beginning of the SF2 file or to the 'smpl' chunk header.
+    if (sdtaOffset == 0 || sdtaSize < 8) {
+        ESP_LOGE(TAG, "Invalid sdta location: offset=%lu size=%lu",
+                 (unsigned long)sdtaOffset, (unsigned long)sdtaSize);
+        return false;
+    }
+
     seekTo(sdtaOffset);
+
     char id[5] = {0};
-    file.readBytes(id, 4);
-    return (strncmp(id, "smpl", 4) == 0);
+    uint32_t size = 0;
+
+    if (file.readBytes(id, 4) != 4 ||
+        file.readBytes((char*)&size, sizeof(size)) != sizeof(size)) {
+        ESP_LOGE(TAG, "Failed to read sdta subchunk header");
+        return false;
+    }
+
+    if (strncmp(id, "smpl", 4) != 0) {
+        ESP_LOGE(TAG, "Expected smpl at sdta offset %lu, found '%.4s'",
+                 (unsigned long)sdtaOffset, id);
+        return false;
+    }
+
+    // file.position() is now the first byte of 16-bit PCM sample data.
+    smplStart = file.position();
+
+    const uint32_t sdtaEnd = sdtaOffset + sdtaSize;
+    if (smplStart > sdtaEnd || size > (sdtaEnd - smplStart)) {
+        ESP_LOGE(TAG,
+                 "Invalid smpl bounds: start=%lu size=%lu sdtaEnd=%lu",
+                 (unsigned long)smplStart, (unsigned long)size,
+                 (unsigned long)sdtaEnd);
+        smplStart = 0;
+        return false;
+    }
+
+    ESP_LOGI(TAG, "smpl data offset: %lu size: %lu",
+             (unsigned long)smplStart, (unsigned long)size);
+    return true;
 }
 
 
@@ -596,7 +633,7 @@ SampleHandle* SF2Parser::readSampleIntoPool(uint32_t sid) {
     SampleHandle* h = samplePool.insertEmpty(
         sid, length,
         s.startLoop - s.start, s.endLoop - s.start,
-        s.sampleRate, s.originalPitch
+        s.sampleRate, s.originalPitch, s.pitchCorrection
     );
 
     if (!h) {
@@ -675,6 +712,10 @@ void SF2Parser::applyGenerators(const std::vector<Generator>& gens, Zone& zone) 
             case GeneratorOperator::CoarseTune:
                 zone.coarseTune = val;
                 break;
+            case GeneratorOperator::ScaleTuning:
+                // SF2 unit: cents per MIDI key. Default is 100.
+                zone.scaleTuning = val;
+                break;
             case GeneratorOperator::AttackVolEnv:
                 zone.attackTime = timecentsToSec(val);
                 break;
@@ -690,8 +731,14 @@ void SF2Parser::applyGenerators(const std::vector<Generator>& gens, Zone& zone) 
             case GeneratorOperator::ReleaseVolEnv:
                 zone.releaseTime = timecentsToSec(val);
                 break;
+            case GeneratorOperator::DelayModEnv:
+                zone.modDelayTime = timecentsToSec(val);
+                break;
             case GeneratorOperator::AttackModEnv:
                 zone.modAttackTime = timecentsToSec(val);
+                break;
+            case GeneratorOperator::HoldModEnv:
+                zone.modHoldTime = timecentsToSec(val);
                 break;
             case GeneratorOperator::DecayModEnv:
                 zone.modDecayTime = timecentsToSec(val);
@@ -702,9 +749,13 @@ void SF2Parser::applyGenerators(const std::vector<Generator>& gens, Zone& zone) 
             case GeneratorOperator::ModEnvToPitch:
                 zone.modEnvToPitch = val;
                 break;
+            case GeneratorOperator::ModEnvToFilterFc:
+                zone.modEnvToFilterFc = val;
+                break;
             case GeneratorOperator::SustainModEnv:
-               // zone.modSustainLevel = powf(10.0f, -val / 200.0f);  // val is in centibels
-                zone.modSustainLevel = val * 0.001f ;  // map to 0..1
+                // SF2 sustainModEnv is attenuation from the envelope peak in 0.1% units:
+                // 0 -> level 1.0, 1000 -> level 0.0.
+                zone.modSustainLevel = fmaxf(0.0f, fminf(1.0f, 1.0f - val * 0.001f));
                 break;
             case GeneratorOperator::Pan:
                 zone.pan = val * 0.01f;

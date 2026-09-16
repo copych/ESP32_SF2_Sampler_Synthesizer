@@ -3,6 +3,7 @@
 #ifdef ENABLE_GUI
 
 #include "TextGUI.h"
+#include "LoadingProgress.h"
 #include "MenuStructure.h"
 #include <SPI.h>
 #include <functional>
@@ -273,9 +274,60 @@ void TextGUI::process() {
 }
 
 void TextGUI::draw() {
-    if (busy) return;
-    if (partialDisplayUpdate() == 0) {
+    if (busy || !inited) return;
+
+    // Observe a monotonic revision rather than only active/value. A short
+    // Program Change can begin and finish between two draw() calls; in that
+    // case the old code never saw active=true and left the 100% loading frame
+    // on the OLED. finish() increments revision, so completion always causes
+    // the normal MIDI activity meter to be rendered again.
+    const uint32_t loadingRevision = LoadingProgress::getRevision();
+    if (loadingRevision != lastLoadingRevision) {
+        lastLoadingRevision = loadingRevision;
+        lastLoadingProgress = LoadingProgress::isActive() ? LoadingProgress::get() : 0xFF;
+        needsRedraw = true;
+    }
+
+    // MIDI activity is external GUI state: NoteOn raises it and ControlTask
+    // periodically decays it.  The event-driven GUI therefore has to notice
+    // when one of the 16 *visible* bar levels changes.  Compare the same
+    // quantized levels used by renderStatusBar(), so we redraw only when the
+    // OLED representation actually changes.
+    if (!LoadingProgress::isActive()) {
+        char activity[49];
+        synth.getActivityString(activity);
+        bool activityChanged = !activityLevelsValid;
+
+        for (int i = 0; i < 16; ++i) {
+            uint8_t level = (uint8_t)activity[i * 3 + 2] - 0x81;
+            if (level > 7) level = 7;
+            if (!activityLevelsValid || level != lastActivityLevels[i]) {
+                lastActivityLevels[i] = level;
+                activityChanged = true;
+            }
+        }
+
+        activityLevelsValid = true;
+        if (activityChanged) needsRedraw = true;
+    } else {
+        // Force a fresh comparison when loading ends, even if MIDI activity
+        // happened to return to the same levels seen before loading.
+        activityLevelsValid = false;
+    }
+
+    // Render the framebuffer only when GUI state changed. If a new redraw
+    // request arrives while a previous tiled transfer is in progress, restart
+    // the transfer from the top-left so the OLED receives one coherent frame.
+    if (needsRedraw) {
         renderDisplay();
+        needsRedraw = false;
+        updateTileX = 0;
+        updateTileY = 0;
+        displayUpdateInProgress = true;
+    }
+
+    if (displayUpdateInProgress && partialDisplayUpdate() == 0) {
+        displayUpdateInProgress = false;
     }
 }
 
@@ -291,6 +343,10 @@ void TextGUI::fullUpdate() {
     renderMenu();
     renderStatusBar();
     display.sendBuffer();
+    needsRedraw = false;
+    displayUpdateInProgress = false;
+    updateTileX = 0;
+    updateTileY = 0;
 }
 
 
@@ -372,9 +428,55 @@ void TextGUI::renderMenu() {
 
 void TextGUI::renderStatusBar() {
     if (!inited) return;
+
+    // Both modes use exactly the same 16 x 6-pixel cells. This keeps the
+    // loading indicator visually identical in width, spacing and centering to
+    // the MIDI activity meter instead of switching to a wider bar geometry.
+    constexpr int cells = 16;
+    constexpr int cellW = 6;
+    constexpr int barW = 5;
+    constexpr int maxH = 7;
+    const int x0 = (display.getDisplayWidth() - cells * cellW) / 2;
+    const int yBottom = display.getDisplayHeight() - 2;
+
+    if (LoadingProgress::isActive()) {
+        const uint16_t units = ((uint16_t)LoadingProgress::get() * cells * maxH + 254u) / 255u;
+        for (int i = 0; i < cells; ++i) {
+            int h = (int)units - i * maxH;
+            if (h < 0) h = 0;
+            if (h > maxH) h = maxH;
+            if (h) display.drawBox(x0 + i * cellW, yBottom - h + 1, barW, h);
+        }
+        return;
+    }
+
+    // Decode the same seven activity levels that getActivityString() used to
+    // encode as Unicode block glyphs, then draw them with the shared geometry.
     char buf[49];
     synth.getActivityString(buf);
-    display.drawUTF8(14, display.getDisplayHeight() - 9, buf);
+    for (int i = 0; i < cells; ++i) {
+        int h = (uint8_t)buf[i * 3 + 2] - 0x81;
+        if (h < 0) h = 0;
+        if (h > maxH) h = maxH;
+        if (h) display.drawBox(x0 + i * cellW, yBottom - h + 1, barW, h);
+    }
+}
+
+void TextGUI::renderLoadingMeter(uint8_t progress) {
+    constexpr int cells = 16;
+    constexpr int cellW = 6;
+    constexpr int barW = 5;
+    constexpr int maxH = 7;
+    const int x0 = (display.getDisplayWidth() - cells * cellW) / 2;
+    const int yBottom = display.getDisplayHeight() - 2;
+    const uint16_t units = ((uint16_t)progress * cells * maxH + 254u) / 255u;
+
+    for (int i = 0; i < cells; ++i) {
+        int h = (int)units - i * maxH;
+        if (h < 0) h = 0;
+        if (h > maxH) h = maxH;
+        if (h) display.drawBox(x0 + i * cellW, yBottom - h + 1, barW, h);
+    }
 }
 
 void TextGUI::enterSubmenu(std::vector<MenuItem>&& items, const String& title) {
@@ -388,22 +490,53 @@ void TextGUI::enterSubmenu(std::vector<MenuItem>&& items, const String& title) {
 }
 
 void TextGUI::busyMessage(const String& str) {
+    if (!inited) return;
     display.clearBuffer();
     display.drawUTF8(0, display.getDisplayHeight() / 2, str.c_str());
     display.sendBuffer();
+    displayUpdateInProgress = false;
+    updateTileX = 0;
+    updateTileY = 0;
 }
 
 void TextGUI::beginBusy(const String& str) {
     busy = true;
+    busyMessage(str);
+}
+
+void TextGUI::loadingPumpThunk(void* ctx, uint8_t progress) {
+    static_cast<TextGUI*>(ctx)->serviceLoadingProgress(progress);
+}
+
+void TextGUI::beginLoading(const String& str) {
+    busy = true;
+    loadingMessage = str;
+    lastLoadingProgress = 0xFF;
+    LoadingProgress::setPump(&TextGUI::loadingPumpThunk, this);
+    busyMessage(str);
+}
+
+void TextGUI::serviceLoadingProgress(uint8_t progress) {
+    if (!inited || progress == lastLoadingProgress) return;
+    lastLoadingProgress = progress;
     display.clearBuffer();
-    display.drawUTF8(0, display.getDisplayHeight() / 2, str.c_str());
+    display.drawUTF8(0, display.getDisplayHeight() / 2, loadingMessage.c_str());
+    renderLoadingMeter(progress);
     display.sendBuffer();
+}
+
+void TextGUI::endLoading() {
+    LoadingProgress::clearPump();
+    LoadingProgress::finish();
+    loadingMessage = String();
+    lastLoadingProgress = 0xFF;
+    busy = false;
+    needsRedraw = true;
 }
 
 void TextGUI::endBusy() {
     busy = false;
     needsRedraw = true;
-    fullUpdate();
 }
 
 void TextGUI::goBack() {
@@ -520,18 +653,32 @@ void TextGUI::adjustValue(int direction, MenuItem& item) {
 
 int TextGUI::partialDisplayUpdate() {
     static const int send_tiles = 4;
-    static const int block_h = display.getBufferTileHeight();
-    static const int block_w = display.getBufferTileWidth();
-    static int cur_xt = 0;
-    static int cur_yt = 0;
-    display.updateDisplayArea(cur_xt, cur_yt, send_tiles, 1);
-    cur_xt += send_tiles;
-    if (cur_xt >= block_w) {
-        cur_xt = 0;
-        cur_yt++;
+    const int block_h = display.getBufferTileHeight();
+    const int block_w = display.getBufferTileWidth();
+
+    if (updateTileY >= block_h) {
+        updateTileX = 0;
+        updateTileY = 0;
+        return 0;
     }
-    cur_yt %= block_h;
-    return cur_xt + cur_yt;
+
+    const int remaining = block_w - updateTileX;
+    const int tiles = (remaining < send_tiles) ? remaining : send_tiles;
+    display.updateDisplayArea(updateTileX, updateTileY, tiles, 1);
+
+    updateTileX += tiles;
+    if (updateTileX >= block_w) {
+        updateTileX = 0;
+        ++updateTileY;
+    }
+
+    if (updateTileY >= block_h) {
+        updateTileX = 0;
+        updateTileY = 0;
+        return 0;
+    }
+
+    return 1;
 }
 
 #endif

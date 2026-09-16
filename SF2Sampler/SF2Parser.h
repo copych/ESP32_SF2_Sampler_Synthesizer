@@ -85,8 +85,9 @@ struct Zone {    // --- Mandatory params ---
     int rootKey = -1;          // OverridingRootKey (if no -> sample->originalPitch)
     int sampleModes = 0;       // SampleModes (loop type)
     int exclusiveClass = 0;    // ExclusiveClass
-    float fineTune = 0.0f;     // FineTune (cents)
+    float fineTune = 0.0f;     // FineTune, stored as semitones
     float coarseTune = 0.0f;   // CoarseTune (semitones)
+    float scaleTuning = 100.0f; // ScaleTuning (cents per MIDI key)
     
     // --- amp envelope ---
     float attackTime = 0.0f;   // AttackVolEnv (seconds)
@@ -95,12 +96,15 @@ struct Zone {    // --- Mandatory params ---
     float sustainLevel = 1.0f; // SustainVolEnv (0.0–1.0)
     float releaseTime = 0.0f;  // ReleaseVolEnv
     float pan = 0.0f;          // Pan (-1.0–1.0)
+    float modDelayTime = 0.0f;
     float modAttackTime = 0.0f;
+    float modHoldTime = 0.0f;
+    float modDecayTime = 0.0f;
+    float modSustainLevel = 1.0f;
     float modReleaseTime = 0.0f;
-    float modDecayTime = -0.1f;
-    float modSustainLevel = 0.0f;
     float attenuation = 1.0f;
     float modEnvToPitch = 0.0f;
+    float modEnvToFilterFc = 0.0f;
 
     // Vibrato LFO (pitch modulation only)
     float vibLfoFreq = 0.0f;       // Hz

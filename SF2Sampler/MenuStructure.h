@@ -67,9 +67,9 @@ static MenuItem createFileBrowserMenu(Synth& synth, fs::FS& fs, const String& pa
                 String fileLabel = entryName.substring(entryName.lastIndexOf("/") + 1);
                 items.push_back(MenuItem::Action(fileLabel, [=](TextGUI& gui) {
                     synthPtr->setFileSystem(type);
-                    gui.beginBusy("Loading SF2...");
+                    gui.beginLoading("Loading SF2...");
                     synthPtr->loadSf2File(fullPath.c_str());
-                    gui.endBusy();
+                    gui.endLoading();
                 }));
             }
         }
