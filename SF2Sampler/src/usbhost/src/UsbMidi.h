@@ -3,8 +3,8 @@
  * Copyright (c) 2025 ndenki
  * https://github.com/enudenki/esp32-usb-host-midi-library.git
  */
-#ifndef USBMIDI_H
-#define USBMIDI_H
+#ifndef USBMIDIHOST_H
+#define USBMIDIHOST_H
 
 #include <Arduino.h>
 #include <usb/usb_host.h>
@@ -92,5 +92,7 @@ private:
     void (*_deviceDisconnectedCallback)();
     Stream* _debugSerial;
 };
+
+#define USB_MIDI_HOST_CREATE_INSTANCE(Name) UsbMidi Name;
 
 #endif // USBMIDI_H
