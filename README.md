@@ -11,7 +11,7 @@ An SF2 (SoundFont 2) based wavetable synth designed specifically for the ESP32-S
 
 ## Overview
 
-The ESP32 SF2 Sampler is a sampler firmware that runs on the ESP32S3 / ESP32P4 variants due to their improved PSRAM and memory management compared to the original ESP32. It supports external DACs like the PCM5102 for high-quality audio output and uses the built-in USB hardware of the MCUs to function as a USB MIDI device. By default, the BOOT button of the DevBoard is configured to cycle through SF2 files on the current filesystem. Long press on BOOT button will switch between Flash LittleFS and SD filesystems.
+The ESP32 SF2 Sampler is a sampler firmware that runs on the ESP32S3 / ESP32P4 variants due to their improved PSRAM and memory management compared to the original ESP32. It supports external DACs like the PCM5102 for high-quality audio output and uses the built-in USB hardware of the MCUs to function as a USB MIDI device.
 
 <img src="./media/prototype.jpg?raw=true">
 
